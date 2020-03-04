@@ -343,7 +343,7 @@ DokanFindStreams(PFILE_STREAM_INFORMATION StreamInfo, PDOKAN_FILE_INFO FileInfo,
   }
 
   if (openInfo->StreamListHead == NULL) {
-    openInfo->StreamListHead = malloc(sizeof(LIST_ENTRY));
+    openInfo->StreamListHead = (PLIST_ENTRY)malloc(sizeof(LIST_ENTRY));
     if (openInfo->StreamListHead != NULL) {
       InitializeListHead(openInfo->StreamListHead);
     } else {

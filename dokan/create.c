@@ -134,7 +134,7 @@ VOID DispatchCreate(HANDLE Handle, // This handle is not for a file. It is for
 
   // DOKAN_OPEN_INFO is structure for a opened file
   // this will be freed by Close
-  openInfo = malloc(sizeof(DOKAN_OPEN_INFO));
+  openInfo = (PDOKAN_OPEN_INFO) malloc(sizeof(DOKAN_OPEN_INFO));
   if (openInfo == NULL) {
     eventInfo.Status = STATUS_INSUFFICIENT_RESOURCES;
     SendEventInformation(Handle, &eventInfo, sizeof(EVENT_INFORMATION), NULL);

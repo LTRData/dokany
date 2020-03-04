@@ -151,7 +151,7 @@ DokanDispatchWrite(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
                   fcb->FileName.Length;
     if (safeEventLength.HighPart != 0 ||
         safeEventLength.QuadPart <
-            sizeof(EVENT_CONTEXT) + fcb->FileName.Length) {
+            (LONGLONG)sizeof(EVENT_CONTEXT) + fcb->FileName.Length) {
       DOKAN_INIT_LOGGER(logger, vcb->DeviceObject->DriverObject, IRP_MJ_WRITE);
       DokanLogError(&logger,
                     STATUS_INVALID_PARAMETER,

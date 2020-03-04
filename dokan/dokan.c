@@ -395,9 +395,9 @@ UINT WINAPI DokanLoop(PVOID pDokanInstance) {
   DWORD result = 0;
   DWORD lastError = 0;
   WCHAR rawDeviceName[MAX_PATH];
-  PDOKAN_INSTANCE DokanInstance = pDokanInstance;
+  PDOKAN_INSTANCE DokanInstance = (PDOKAN_INSTANCE)pDokanInstance;
 
-  buffer = malloc(sizeof(char) * EVENT_CONTEXT_MAX_SIZE);
+  buffer = (char*)malloc(sizeof(char) * EVENT_CONTEXT_MAX_SIZE);
   if (buffer == NULL) {
     result = (DWORD)-1;
     _endthreadex(result);
@@ -684,7 +684,7 @@ BOOL SendGlobalReleaseIRP(LPCWSTR MountPoint) {
       ULONG returnedLength;
       ULONG inputLength = sizeof(DOKAN_UNICODE_STRING_INTERMEDIATE) +
                           (MAX_PATH * sizeof(WCHAR));
-      PDOKAN_UNICODE_STRING_INTERMEDIATE szMountPoint = malloc(inputLength);
+      PDOKAN_UNICODE_STRING_INTERMEDIATE szMountPoint = (PDOKAN_UNICODE_STRING_INTERMEDIATE)malloc(inputLength);
 
       if (szMountPoint != NULL) {
         ZeroMemory(szMountPoint, inputLength);
@@ -845,7 +845,7 @@ PDOKAN_CONTROL DOKANAPI DokanGetMountPointList(BOOL uncOnly, PULONG nbRead) {
   do {
     if (dokanControl != NULL)
       free(dokanControl);
-    dokanControl = malloc(bufferLength);
+    dokanControl = (PDOKAN_CONTROL)malloc(bufferLength);
     if (dokanControl == NULL)
       return NULL;
     ZeroMemory(dokanControl, bufferLength);
@@ -867,7 +867,7 @@ PDOKAN_CONTROL DOKANAPI DokanGetMountPointList(BOOL uncOnly, PULONG nbRead) {
   }
 
   *nbRead = returnedLength / sizeof(DOKAN_CONTROL);
-  results = malloc(returnedLength);
+  results = (PDOKAN_CONTROL)malloc(returnedLength);
   if (results != NULL) {
     for (ULONG i = 0; i < *nbRead; ++i) {
       if (!uncOnly || wcscmp(dokanControl[i].UNCName, L"") != 0)
@@ -1021,7 +1021,7 @@ BOOL DOKANAPI DokanNotifyPath(LPCWSTR FilePath, ULONG CompletionFilter,
   ULONG returnedLength;
   ULONG inputLength = (ULONG)(
       sizeof(DOKAN_NOTIFY_PATH_INTERMEDIATE) + (length * sizeof(WCHAR)));
-  PDOKAN_NOTIFY_PATH_INTERMEDIATE pNotifyPath = malloc(inputLength);
+  PDOKAN_NOTIFY_PATH_INTERMEDIATE pNotifyPath = (PDOKAN_NOTIFY_PATH_INTERMEDIATE)malloc(inputLength);
   if (pNotifyPath == NULL) {
     DbgPrint("Failed to allocate NotifyPath\n");
     return FALSE;

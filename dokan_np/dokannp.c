@@ -41,7 +41,7 @@ static VOID DokanDbgPrintW(LPCWSTR format, ...) {
 
   va_start(argp, format);
   length = _vscwprintf(format, argp) + 1;
-  buffer = _malloca(length * sizeof(WCHAR));
+  buffer = (WCHAR*)_malloca(length * sizeof(WCHAR));
   if (buffer) {
     StringCchVPrintfW(buffer, length, format, argp);
     outputString = buffer;
@@ -645,7 +645,7 @@ DWORD APIENTRY NPEnumResource(__in HANDLE Enum, __in LPDWORD Count,
       if (pCtx->fRoot) {
         WCHAR *lpServerName = NULL;
         ULONG ulServerName = 0;
-        parseServerName(&dokanControl[pCtx->index].UNCName[1], &lpServerName,
+        parseServerName(&dokanControl[pCtx->index].UNCName[1], (LPCWSTR*)&lpServerName,
           &ulServerName);
 
         /* Return server.
@@ -781,8 +781,8 @@ DWORD APIENTRY NPGetResourceInformation(__in LPNETRESOURCE NetResource,
 
   WCHAR *lpServerName = NULL;
   ULONG ulServerName = 0;
-  const WCHAR *lpAfterName =
-      parseServerName(NetResource->lpRemoteName, &lpServerName, &ulServerName);
+  const WCHAR *lpAfterName = parseServerName(
+      NetResource->lpRemoteName, (LPCWSTR *)&lpServerName, &ulServerName);
   if (lpServerName == NULL || lpAfterName == NULL ||
       (*lpAfterName != L'\\' && *lpAfterName != 0)) {
     DbgPrintW(L"NPGetResourceInformation: WN_BAD_NETNAME\n");

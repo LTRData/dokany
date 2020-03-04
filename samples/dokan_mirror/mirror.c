@@ -54,7 +54,7 @@ static void DbgPrint(LPCWSTR format, ...) {
 
     va_start(argp, format);
     length = _vscwprintf(format, argp) + 1;
-    buffer = _malloca(length * sizeof(WCHAR));
+    buffer = (LPWSTR)_malloca(length * sizeof(WCHAR));
     if (buffer) {
       vswprintf_s(buffer, length, format, argp);
       outputString = buffer;
@@ -280,6 +280,9 @@ MirrorCreateFile(LPCWSTR FileName, PDOKAN_IO_SECURITY_CONTEXT SecurityContext,
 
   DbgPrint(L"\tFlagsAndAttributes = 0x%x\n", fileAttributesAndFlags);
 
+#define FILE_ATTRIBUTE_INTEGRITY_STREAM 0x00008000
+#define FILE_ATTRIBUTE_NO_SCRUB_DATA 0x00020000
+ 
   MirrorCheckFlag(fileAttributesAndFlags, FILE_ATTRIBUTE_ARCHIVE);
   MirrorCheckFlag(fileAttributesAndFlags, FILE_ATTRIBUTE_COMPRESSED);
   MirrorCheckFlag(fileAttributesAndFlags, FILE_ATTRIBUTE_DEVICE);
@@ -1212,6 +1215,12 @@ static NTSTATUS DOKAN_CALLBACK MirrorGetFileSecurity(
 
   DbgPrint(L"GetFileSecurity %s\n", filePath);
 
+#define ATTRIBUTE_SECURITY_INFORMATION (0x00000020L)
+#define SCOPE_SECURITY_INFORMATION (0x00000040L)
+#define PROCESS_TRUST_LABEL_SECURITY_INFORMATION (0x00000080L)
+#define ACCESS_FILTER_SECURITY_INFORMATION (0x00000100L)
+#define BACKUP_SECURITY_INFORMATION (0x00010000L)
+
   MirrorCheckFlag(*SecurityInformation, FILE_SHARE_READ);
   MirrorCheckFlag(*SecurityInformation, OWNER_SECURITY_INFORMATION);
   MirrorCheckFlag(*SecurityInformation, GROUP_SECURITY_INFORMATION);
@@ -1436,7 +1445,7 @@ typedef struct _IO_STATUS_BLOCK {
 
 NTSYSCALLAPI NTSTATUS NTAPI NtQueryInformationFile(
     _In_ HANDLE FileHandle, _Out_ PIO_STATUS_BLOCK IoStatusBlock,
-    _Out_writes_bytes_(Length) PVOID FileInformation, _In_ ULONG Length,
+    PVOID FileInformation, _In_ ULONG Length,
     _In_ FILE_INFORMATION_CLASS FileInformationClass);
 /**
  * END

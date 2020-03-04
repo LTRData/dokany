@@ -188,14 +188,14 @@ DokanSetRenameInformation(PEVENT_CONTEXT EventContext,
       if (EventContext->Operation.SetFile.FileName[pos] == '\\')
         break;
     }
-    newName = (WCHAR *)malloc((pos + 1) * sizeof(WCHAR) +
-                              renameInfo->FileNameLength + sizeof(WCHAR));
+    newName = (WCHAR *)malloc((size_t)((pos + 1) * sizeof(WCHAR) +
+                              renameInfo->FileNameLength + sizeof(WCHAR)));
     if (newName == NULL)
       return STATUS_INSUFFICIENT_RESOURCES;
-    ZeroMemory(newName, (pos + 1) * sizeof(WCHAR) + renameInfo->FileNameLength +
-                            sizeof(WCHAR));
+    ZeroMemory(newName, (size_t)((pos + 1) * sizeof(WCHAR) + renameInfo->FileNameLength +
+                            sizeof(WCHAR)));
     RtlCopyMemory(newName, EventContext->Operation.SetFile.FileName,
-                  (pos + 1) * sizeof(WCHAR));
+                  (size_t)((pos + 1) * sizeof(WCHAR)));
     RtlCopyMemory((PCHAR)newName + (pos + 1) * sizeof(WCHAR),
                   renameInfo->FileName, renameInfo->FileNameLength);
   } else {

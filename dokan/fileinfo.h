@@ -722,7 +722,15 @@ typedef struct _FILE_ID_BOTH_DIR_INFORMATION {
   WCHAR FileName[1];
 } FILE_ID_BOTH_DIR_INFORMATION, *PFILE_ID_BOTH_DIR_INFORMATION;
 
-/**
+#ifndef FILE_FLAG_SESSION_AWARE
+#define FILE_FLAG_SESSION_AWARE 0x00800000
+
+  typedef struct _FILE_ID_128 {
+  BYTE Identifier[16];
+} FILE_ID_128, *PFILE_ID_128;
+#endif
+
+ /**
  * \struct FILE_ID_EXTD_BOTH_DIR_INFORMATION
  * \brief Used to query detailed information for the files in a directory.
  */

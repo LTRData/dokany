@@ -304,25 +304,30 @@ DokanFillDirectoryInformation(FILE_INFORMATION_CLASS DirectoryInfo,
 
   switch (DirectoryInfo) {
   case FileDirectoryInformation:
-    DokanFillDirInfo(Buffer, FindData, Index, DokanInstance);
+    DokanFillDirInfo((PFILE_DIRECTORY_INFORMATION)Buffer, FindData, Index, DokanInstance);
     break;
   case FileFullDirectoryInformation:
-    DokanFillFullDirInfo(Buffer, FindData, Index, DokanInstance);
+    DokanFillFullDirInfo((PFILE_FULL_DIR_INFORMATION)Buffer, FindData, Index,
+                         DokanInstance);
     break;
   case FileIdFullDirectoryInformation:
-    DokanFillIdFullDirInfo(Buffer, FindData, Index, DokanInstance);
+    DokanFillIdFullDirInfo((PFILE_ID_FULL_DIR_INFORMATION)Buffer, FindData, Index,
+                           DokanInstance);
     break;
   case FileNamesInformation:
-    DokanFillNamesInfo(Buffer, FindData, Index);
+    DokanFillNamesInfo((PFILE_NAMES_INFORMATION)Buffer, FindData, Index);
     break;
   case FileBothDirectoryInformation:
-    DokanFillBothDirInfo(Buffer, FindData, Index, DokanInstance);
+    DokanFillBothDirInfo((PFILE_BOTH_DIR_INFORMATION)Buffer, FindData, Index,
+                         DokanInstance);
     break;
   case FileIdBothDirectoryInformation:
-    DokanFillIdBothDirInfo(Buffer, FindData, Index, DokanInstance);
+    DokanFillIdBothDirInfo((PFILE_ID_BOTH_DIR_INFORMATION)Buffer, FindData, Index,
+                           DokanInstance);
     break;
   case FileIdExtdBothDirectoryInformation:
-    DokanFillIdExtBothDirInfo(Buffer, FindData, Index, DokanInstance);
+    DokanFillIdExtBothDirInfo((PFILE_ID_EXTD_BOTH_DIR_INFORMATION)Buffer, FindData, Index,
+                              DokanInstance);
     break;    
   default:
     break;
@@ -414,7 +419,7 @@ LONG MatchFiles(PEVENT_CONTEXT EventContext, PEVENT_INFORMATION EventInfo,
       if (EventContext->Operation.Directory.FileIndex <= index) {
         // index+1 is very important, should use next entry index
         ULONG entrySize = DokanFillDirectoryInformation(
-            EventContext->Operation.Directory.FileInformationClass,
+            (FILE_INFORMATION_CLASS)EventContext->Operation.Directory.FileInformationClass,
             currentBuffer, &lengthRemaining, &find->FindData, index + 1,
             DokanInstance);
         // buffer is full
@@ -559,7 +564,7 @@ VOID DispatchDirectoryInformation(HANDLE Handle, PEVENT_CONTEXT EventContext,
   eventInfo->BufferLength = EventContext->Operation.Directory.BufferLength;
 
   if (openInfo->DirListHead == NULL) {
-    openInfo->DirListHead = malloc(sizeof(LIST_ENTRY));
+    openInfo->DirListHead = (PLIST_ENTRY)malloc(sizeof(LIST_ENTRY));
     if (openInfo->DirListHead != NULL) {
       InitializeListHead(openInfo->DirListHead);
     } else {
