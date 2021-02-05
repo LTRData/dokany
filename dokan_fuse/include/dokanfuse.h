@@ -29,9 +29,11 @@ struct fuse_config
   const char *fsname, *volname, *uncname;
   int help;
   int debug;
+  int mountManager;
   int readonly;
   int setsignals;
   unsigned int timeoutInSec;
+  int removableDrive;
   int networkDrive;
   unsigned long allocationUnitSize;
   unsigned long sectorSize;

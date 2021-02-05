@@ -225,7 +225,35 @@ DWORD APIENTRY NPAddConnection3(__in HWND WndOwner,
 
 DWORD APIENTRY NPCancelConnection(__in LPWSTR Name, __in BOOL Force) {
   DbgPrintW(L"NpCancelConnection %s %d\n", Name, Force);
-  return WN_SUCCESS;
+
+  ULONG nbRead = 0;
+  WCHAR dosDevice[] = L"\\DosDevices\\C:";
+  PDOKAN_CONTROL dokanControl = DokanGetMountPointList(FALSE, &nbRead);
+  if (dokanControl == NULL) {
+    DbgPrintW(L"NpGetConnection DokanGetMountPointList failed\n");
+    return WN_NOT_CONNECTED;
+  }
+
+  dosDevice[12] = Name[0];
+
+  for (unsigned int i = 0; i < nbRead; ++i) {
+    if (wcscmp(dokanControl[i].MountPoint, dosDevice) == 0) {
+      if (dokanControl[i].MountOptions & DOKAN_EVENT_ENABLE_NETWORK_UNMOUNT) {
+        DokanReleaseMountPointList(dokanControl);
+        if (DokanRemoveMountPoint(Name)) {
+          DbgPrintW(L"NpCancelConnection: DokanRemoveMountPoint succeeded\n");
+          return WN_SUCCESS;
+        } else {
+          DbgPrintW(L"NpCancelConnection: DokanRemoveMountPoint failed\n");
+          return WN_BAD_VALUE;
+        }
+      }
+    }
+  }
+
+  DbgPrintW(L"NpCancelConnection Disconnect was ignored\n");
+
+  return WN_NO_ERROR;
 }
 
 DWORD APIENTRY NPGetConnection(__in LPWSTR LocalName, __out LPWSTR RemoteName,
@@ -550,7 +578,7 @@ DWORD APIENTRY NPEnumResource(__in HANDLE Enum, __in LPDWORD Count,
   }
 
   DbgPrintW(
-      L"NPEnumResource: *lpcCount 0x%x, *lpBufferSize 0x%x, pCtx->index %d\n",
+      L"NPEnumResource: *lpcCount 0x%x, *lpBufferSize 0x%x, pCtx->index %lu\n",
       *Count, *BufferSize, pCtx->index);
 
   LPNETRESOURCE pNetResource = (LPNETRESOURCE)Buffer;
@@ -567,22 +595,18 @@ DWORD APIENTRY NPEnumResource(__in HANDLE Enum, __in LPDWORD Count,
 
   DWORD processId = GetCurrentProcessId();
   DWORD sessionId = 0;
-  BOOL  isBelongToCurrentSession = TRUE;
   ProcessIdToSessionId(processId, &sessionId);
-  DbgPrintW(L"NPEnumResource CurrentSesstionID:%d\n", sessionId);
-  DbgPrintW(L"NPEnumResource nbRead:%d\n", nbRead);
+  DbgPrintW(L"NPEnumResource CurrentSesstionID: %d\n", sessionId);
+  DbgPrintW(L"NPEnumResource nbRead: %d\n", nbRead);
 
   while (cEntriesCopied < *Count && pCtx->index < nbRead) {
-    DbgPrintW(L"NPEnumResource SesstionID:%d\n", dokanControl[pCtx->index].SessionId);
-    isBelongToCurrentSession = TRUE;
-    if (sessionId != dokanControl[pCtx->index].SessionId && -1 != dokanControl[pCtx->index].SessionId)
-    {
-      isBelongToCurrentSession = FALSE;
+    DbgPrintW(L"NPEnumResource SesstionID: %lu\n", dokanControl[pCtx->index].SessionId);
+    if (-1 != dokanControl[pCtx->index].SessionId && sessionId != dokanControl[pCtx->index].SessionId) {
       pCtx->index++;
       continue;
     }
     if (wcscmp(dokanControl[pCtx->index].UNCName, L"") == 0) {
-      DbgPrintW(L"NPEnumResource: end reached at index %d\n", pCtx->index);
+      DbgPrintW(L"NPEnumResource: end reached at index %lu\n", pCtx->index);
       break;
     }
 

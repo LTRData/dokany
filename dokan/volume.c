@@ -1,6 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
+  Copyright (C) 2020 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -242,6 +243,7 @@ DokanFsAttributeInformation(PEVENT_INFORMATION EventInfo,
   bytesToCopy = (ULONG)wcslen(fsName) * sizeof(WCHAR);
   if (remainingLength < bytesToCopy) {
     bytesToCopy = remainingLength;
+    status = STATUS_BUFFER_OVERFLOW;
   }
 
   attrInfo->FileSystemNameLength = bytesToCopy;
@@ -251,7 +253,7 @@ DokanFsAttributeInformation(PEVENT_INFORMATION EventInfo,
   EventInfo->BufferLength =
       EventContext->Operation.Volume.BufferLength - remainingLength;
 
-  return STATUS_SUCCESS;
+  return status;
 }
 
 NTSTATUS
@@ -314,8 +316,8 @@ VOID DispatchQueryVolumeInformation(HANDLE Handle, PEVENT_CONTEXT EventContext,
   PEVENT_INFORMATION eventInfo;
   DOKAN_FILE_INFO fileInfo;
   PDOKAN_OPEN_INFO openInfo;
-  ULONG sizeOfEventInfo = sizeof(EVENT_INFORMATION) - 8 +
-                          EventContext->Operation.Volume.BufferLength;
+  ULONG sizeOfEventInfo = DispatchGetEventInformationLength(
+      EventContext->Operation.Volume.BufferLength);
 
   eventInfo = (PEVENT_INFORMATION)malloc(sizeOfEventInfo);
   if (eventInfo == NULL) {
@@ -335,7 +337,7 @@ VOID DispatchQueryVolumeInformation(HANDLE Handle, PEVENT_CONTEXT EventContext,
   fileInfo.ProcessId = EventContext->ProcessId;
   fileInfo.DokanOptions = DokanInstance->DokanOptions;
 
-  eventInfo->Status = STATUS_NOT_IMPLEMENTED;
+  eventInfo->Status = STATUS_INVALID_PARAMETER;
   eventInfo->BufferLength = 0;
 
   DbgPrint("###QueryVolumeInfo %04d\n",
@@ -363,6 +365,7 @@ VOID DispatchQueryVolumeInformation(HANDLE Handle, PEVENT_CONTEXT EventContext,
              EventContext->Operation.Volume.FsInformationClass);
   }
 
-  SendEventInformation(Handle, eventInfo, sizeOfEventInfo, NULL);
+  SendEventInformation(Handle, eventInfo, sizeOfEventInfo);
+  ReleaseDokanOpenInfo(eventInfo, &fileInfo, DokanInstance);
   free(eventInfo);
 }

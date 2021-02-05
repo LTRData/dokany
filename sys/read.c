@@ -1,8 +1,8 @@
 /*
   Dokan : user-mode file system library for Windows
 
+  Copyright (C) 2017 - 2020 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
-  Copyright (C) 2017 Google, Inc.
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
   http://dokan-dev.github.io
@@ -306,7 +306,7 @@ VOID DokanCompleteRead(__in PIRP_ENTRY IrpEntry,
   // available buffer size
   bufferLen = irpSp->Parameters.Read.Length;
 
-  DDbgPrint("  bufferLen %d, Event.BufferLen %d\n", bufferLen,
+  DDbgPrint("  bufferLen %lu, Event.BufferLen %lu\n", bufferLen,
             EventInfo->BufferLength);
 
   // buffer is not specified or short of length
@@ -337,16 +337,6 @@ VOID DokanCompleteRead(__in PIRP_ENTRY IrpEntry,
   if (IrpEntry->Flags & DOKAN_MDL_ALLOCATED) {
     DokanFreeMdl(irp);
     IrpEntry->Flags &= ~DOKAN_MDL_ALLOCATED;
-  }
-
-  if (NT_SUCCESS(status)) {
-    DDbgPrint("  STATUS_SUCCESS\n");
-  } else if (status == STATUS_INSUFFICIENT_RESOURCES) {
-    DDbgPrint("  STATUS_INSUFFICIENT_RESOURCES\n");
-  } else if (status == STATUS_END_OF_FILE) {
-    DDbgPrint("  STATUS_END_OF_FILE\n");
-  } else {
-    DDbgPrint("  status = 0x%X\n", status);
   }
 
   DokanCompleteIrpRequest(irp, status, readLength);

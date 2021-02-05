@@ -1,6 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
+  Copyright (C) 2020 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -280,9 +281,12 @@ BOOL DOKANAPI DokanNetworkProviderInstall() {
   ZeroMemory(&buffer, sizeof(buffer));
   ZeroMemory(commanp, sizeof(commanp));
 
-  RegCreateKeyEx(HKEY_LOCAL_MACHINE, DOKAN_NP_SERVICE_KEY L"\\NetworkProvider",
-                 0, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &key,
-                 &position);
+  if (RegCreateKeyEx(HKEY_LOCAL_MACHINE,
+                     DOKAN_NP_SERVICE_KEY L"\\NetworkProvider", 0, NULL,
+                     REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &key,
+                     &position) != ERROR_SUCCESS) {
+    return FALSE;
+  }
 
   RegSetValueEx(key, L"DeviceName", 0, REG_SZ, (BYTE *)DOKAN_NP_DEVICE_NAME,
                 (DWORD)(wcslen(DOKAN_NP_DEVICE_NAME) + 1) * sizeof(WCHAR));
@@ -295,18 +299,27 @@ BOOL DOKANAPI DokanNetworkProviderInstall() {
 
   RegCloseKey(key);
 
-  RegOpenKeyEx(HKEY_LOCAL_MACHINE, DOKAN_NP_ORDER_KEY, 0, KEY_ALL_ACCESS, &key);
+  if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, DOKAN_NP_ORDER_KEY, 0, KEY_ALL_ACCESS,
+                   &key) != ERROR_SUCCESS) {
+    return FALSE;
+  }
+  
 
-  RegQueryValueEx(key, L"ProviderOrder", 0, &type, (BYTE *)&buffer,
-                  &buffer_size);
+  if (RegQueryValueEx(key, L"ProviderOrder", 0, &type, (BYTE *)&buffer,
+                      &buffer_size) != ERROR_SUCCESS) {
+    return FALSE;
+  }
 
   wcscat_s(commanp, sizeof(commanp) / sizeof(WCHAR), L",");
   wcscat_s(commanp, sizeof(commanp) / sizeof(WCHAR), DOKAN_NP_NAME);
 
   if (wcsstr(buffer, commanp) == NULL) {
     wcscat_s(buffer, sizeof(buffer) / sizeof(WCHAR), commanp);
-    RegSetValueEx(key, L"ProviderOrder", 0, REG_SZ, (BYTE *)&buffer,
-                  (DWORD)(wcslen(buffer) + 1) * sizeof(WCHAR));
+    if (RegSetValueEx(key, L"ProviderOrder", 0, REG_SZ, (BYTE *)&buffer,
+                      (DWORD)(wcslen(buffer) + 1) * sizeof(WCHAR))
+            != ERROR_SUCCESS) {
+      return FALSE;
+    }
   }
 
   RegCloseKey(key);
@@ -454,6 +467,11 @@ BOOL DeleteMountPoint(LPCWSTR MountPoint) {
   if (result) {
     DbgPrintW(L"DeleteMountPoint %s success\n", MountPoint);
   } else {
+    if (GetLastError() == ERROR_NOT_A_REPARSE_POINT) {
+      // Not a failure for us as this happen when mount manager
+      // is used and reparse point is removed from kernel.
+      return TRUE;
+    }
     FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, NULL, GetLastError(),
                   MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), errorMsg, 256,
                   NULL);
@@ -514,7 +532,7 @@ void DokanBroadcastLink(WCHAR cLetter, BOOL bRemoved, BOOL safe) {
   params.dbcv_flags = 0;
 
   if (BroadcastSystemMessage(
-          BSF_NOHANG | BSF_FORCEIFHUNG | BSF_NOTIMEOUTIFNOTHUNG, &receipients,
+          BSF_NOHANG | BSF_FORCEIFHUNG, &receipients,
           WM_DEVICECHANGE, device_event, (LPARAM)&params) <= 0) {
 
     DbgPrint("DokanBroadcastLink: BroadcastSystemMessage failed - %d\n",
@@ -534,11 +552,10 @@ BOOL DokanMount(LPCWSTR MountPoint, LPCWSTR DeviceName,
   UNREFERENCED_PARAMETER(DokanOptions);
   if (MountPoint != NULL) {
     if (!IsMountPointDriveLetter(MountPoint)) {
-      // Unfortunately mount manager is not working as excepted and don't
-      // support mount folder on associated IOCTL, which breaks dokan (ghost
-      // drive, ...)
-      // In that case we cannot use mount manager ; doesn't this should be done
-      // kernel-mode too?
+      if (DokanOptions->Options & DOKAN_OPTION_MOUNT_MANAGER) {
+        return TRUE; // Kernel has already created the reparse point.
+      }
+      // Should it not also be moved to kernel ?
       return CreateMountPoint(MountPoint, DeviceName);
     } else {
       // Notify applications / explorer
@@ -548,7 +565,7 @@ BOOL DokanMount(LPCWSTR MountPoint, LPCWSTR DeviceName,
   return TRUE;
 }
 
-BOOL DOKANAPI DokanRemoveMountPointEx(LPCWSTR MountPoint, BOOL Safe) {
+BOOL DokanRemoveMountPointEx(LPCWSTR MountPoint, BOOL Safe) {
   if (MountPoint != NULL) {
     size_t length = wcslen(MountPoint);
     if (length > 0) {
@@ -566,12 +583,8 @@ BOOL DOKANAPI DokanRemoveMountPointEx(LPCWSTR MountPoint, BOOL Safe) {
 
       if (SendGlobalReleaseIRP(mountPoint)) {
         if (!IsMountPointDriveLetter(MountPoint)) {
-          length = wcslen(mountPoint);
-          if (length + 1 < MAX_PATH) {
-            mountPoint[length] = L'\\';
-            mountPoint[length + 1] = L'\0';
-            return DeleteMountPoint(mountPoint);
-          }
+          wcscat_s(mountPoint, sizeof(mountPoint) / sizeof(WCHAR), L"\\");
+          return DeleteMountPoint(mountPoint);
         } else {
           // Notify applications / explorer
           DokanBroadcastLink(MountPoint[0], TRUE, Safe);

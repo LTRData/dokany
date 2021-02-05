@@ -2,7 +2,7 @@
   Dokan : user-mode file system library for Windows
 
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
-  Copyright (C) 2017 Google, Inc.
+  Copyright (C) 2020 Google, Inc.
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
   http://dokan-dev.github.io
@@ -21,188 +21,16 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "dokan.h"
+#include "util/fcb.h"
+#include "util/str.h"
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(PAGE, DokanDispatchCreate)
 #pragma alloc_text(PAGE, DokanCheckShareAccess)
 #endif
 
-static const UNICODE_STRING keepAliveFileName =
-    RTL_CONSTANT_STRING(DOKAN_KEEPALIVE_FILE_NAME);
-
-static const UNICODE_STRING notificationFileName =
-    RTL_CONSTANT_STRING(DOKAN_NOTIFICATION_FILE_NAME);
-
-// We must NOT call without VCB lock
-PDokanFCB DokanAllocateFCB(__in PDokanVCB Vcb, __in PWCHAR FileName,
-                           __in ULONG FileNameLength) {
-  PDokanFCB fcb = ExAllocateFromLookasideListEx(&g_DokanFCBLookasideList);
-
-  if (fcb == NULL) {
-    return NULL;
-  }
-
-  ASSERT(Vcb != NULL);
-
-  RtlZeroMemory(fcb, sizeof(DokanFCB));
-
-  fcb->AdvancedFCBHeader.Resource =
-      ExAllocateFromLookasideListEx(&g_DokanEResourceLookasideList);
-  if (fcb->AdvancedFCBHeader.Resource == NULL) {
-    ExFreeToLookasideListEx(&g_DokanFCBLookasideList, fcb);
-    return NULL;
-  }
-
-  fcb->Identifier.Type = FCB;
-  fcb->Identifier.Size = sizeof(DokanFCB);
-
-  fcb->Vcb = Vcb;
-
-  ExInitializeResourceLite(&fcb->PagingIoResource);
-  ExInitializeResourceLite(fcb->AdvancedFCBHeader.Resource);
-
-  ExInitializeFastMutex(&fcb->AdvancedFCBHeaderMutex);
-
-  FsRtlSetupAdvancedHeader(&fcb->AdvancedFCBHeader,
-                           &fcb->AdvancedFCBHeaderMutex);
-
-  // ValidDataLength not supported - initialize to 0x7fffffff / 0xffffffff
-  // If fcb->Header.IsFastIoPossible was set
-  // the Cache manager would send us a SetFilelnformation IRP to update this value
-  fcb->AdvancedFCBHeader.ValidDataLength.QuadPart = MAXLONGLONG;
-
-  fcb->AdvancedFCBHeader.PagingIoResource = &fcb->PagingIoResource;
-
-  fcb->AdvancedFCBHeader.AllocationSize.QuadPart = 4096;
-  fcb->AdvancedFCBHeader.FileSize.QuadPart = 4096;
-
-  fcb->AdvancedFCBHeader.IsFastIoPossible = FastIoIsNotPossible;
-  FsRtlInitializeOplock(DokanGetFcbOplock(fcb));
-
-  fcb->FileName.Buffer = FileName;
-  fcb->FileName.Length = (USHORT)FileNameLength;
-  fcb->FileName.MaximumLength = (USHORT)FileNameLength;
-
-  InitializeListHead(&fcb->NextCCB);
-  InsertTailList(&Vcb->NextFCB, &fcb->NextFCB);
-
-  InterlockedIncrement(&Vcb->FcbAllocated);
-
-  return fcb;
-}
-
-PDokanFCB DokanGetFCB(__in PDokanVCB Vcb, __in PWCHAR FileName,
-                      __in ULONG FileNameLength, BOOLEAN CaseSensitive) {
-  PLIST_ENTRY thisEntry, nextEntry, listHead;
-  PDokanFCB fcb = NULL;
-
-  UNICODE_STRING fn;
-
-  fn.Length = (USHORT)FileNameLength;
-  fn.MaximumLength = fn.Length + sizeof(WCHAR);
-  fn.Buffer = FileName;
-
-  DokanVCBLockRW(Vcb);
-
-  // search the FCB which is already allocated
-  // (being used now)
-  listHead = &Vcb->NextFCB;
-
-  for (thisEntry = listHead->Flink; thisEntry != listHead;
-       thisEntry = nextEntry) {
-
-    nextEntry = thisEntry->Flink;
-
-    fcb = CONTAINING_RECORD(thisEntry, DokanFCB, NextFCB);
-    DDbgPrint("  DokanGetFCB has entry FileName: %wZ FileCount: %lu. Looking "
-              "for %ls\n",
-              &fcb->FileName, fcb->FileCount, FileName);
-    if (fcb->FileName.Length == FileNameLength // FileNameLength in bytes
-        && RtlEqualUnicodeString(&fn, &fcb->FileName, !CaseSensitive)) {
-      // we have the FCB which is already allocated and used
-      DDbgPrint("  Found existing FCB for %ls\n", FileName);
-      break;
-    }
-
-    fcb = NULL;
-  }
-
-  // we don't have FCB
-  if (fcb == NULL) {
-    DDbgPrint("  Allocate FCB for %ls\n", FileName);
-
-    fcb = DokanAllocateFCB(Vcb, FileName, FileNameLength);
-
-    // no memory?
-    if (fcb == NULL) {
-      DDbgPrint("    Was not able to get FCB for FileName %ls\n", FileName);
-      ExFreePool(FileName);
-      DokanVCBUnlock(Vcb);
-      return NULL;
-    }
-
-    ASSERT(fcb != NULL);
-    if (RtlEqualUnicodeString(&fcb->FileName, &keepAliveFileName, FALSE)) {
-      fcb->IsKeepalive = TRUE;
-      fcb->BlockUserModeDispatch = TRUE;
-    }
-    if (RtlEqualUnicodeString(&fcb->FileName, &notificationFileName, FALSE)) {
-      fcb->BlockUserModeDispatch = TRUE;
-    }
-
-    // we already have FCB
-  } else {
-    // FileName (argument) is never used and must be freed
-    ExFreePool(FileName);
-  }
-
-  InterlockedIncrement(&fcb->FileCount);
-  DokanVCBUnlock(Vcb);
-  return fcb;
-}
-
-NTSTATUS
-DokanFreeFCB(__in PDokanVCB Vcb, __in PDokanFCB Fcb) {
-  DOKAN_INIT_LOGGER(logger, Vcb->DeviceObject->DriverObject, 0);
-  ASSERT(Vcb != NULL);
-  ASSERT(Fcb != NULL);
-
-  ASSERT(Fcb->Vcb == Vcb);
-
-  DokanVCBLockRW(Vcb);
-  DokanFCBLockRW(Fcb);
-
-  if (InterlockedDecrement(&Fcb->FileCount) == 0) {
-    RemoveEntryList(&Fcb->NextFCB);
-    InitializeListHead(&Fcb->NextCCB);
-
-    DDbgPrint("  Free FCB:%p\n", Fcb);
-
-    ExFreePool(Fcb->FileName.Buffer);
-    Fcb->FileName.Buffer = NULL;
-    Fcb->FileName.Length = 0;
-    Fcb->FileName.MaximumLength = 0;
-
-    FsRtlUninitializeOplock(DokanGetFcbOplock(Fcb));
-
-    FsRtlTeardownPerStreamContexts(&Fcb->AdvancedFCBHeader);
-
-    Fcb->Identifier.Type = FREED_FCB;
-    DokanFCBUnlock(Fcb);
-    ExDeleteResourceLite(Fcb->AdvancedFCBHeader.Resource);
-    ExFreeToLookasideListEx(&g_DokanEResourceLookasideList,
-                            Fcb->AdvancedFCBHeader.Resource);
-    ExDeleteResourceLite(&Fcb->PagingIoResource);
-
-    InterlockedIncrement(&Vcb->FcbFreed);
-    ExFreeToLookasideListEx(&g_DokanFCBLookasideList, Fcb);
-  } else {
-    DokanFCBUnlock(Fcb);
-  }
-
-  DokanVCBUnlock(Vcb);
-  return STATUS_SUCCESS;
-}
+static const UNICODE_STRING systemVolumeInformationFileName =
+    RTL_CONSTANT_STRING(L"\\System Volume Information");
 
 // DokanAllocateCCB must be called with exlusive Fcb lock held.
 PDokanCCB DokanAllocateCCB(__in PDokanDCB Dcb, __in PDokanFCB Fcb) {
@@ -228,6 +56,7 @@ PDokanCCB DokanAllocateCCB(__in PDokanDCB Dcb, __in PDokanFCB Fcb) {
   InsertTailList(&Fcb->NextCCB, &ccb->NextCCB);
 
   ccb->MountId = Dcb->MountId;
+  ccb->ProcessId = PsGetCurrentProcessId();
 
   InterlockedIncrement(&Fcb->Vcb->CcbAllocated);
   return ccb;
@@ -284,7 +113,7 @@ DokanFreeCCB(__in PDokanCCB ccb) {
   return STATUS_SUCCESS;
 }
 
-// Creates a buffer from ExAllocatePool() containing
+// Creates a buffer from DokanAlloc() containing
 // the parent dir of file/dir pointed to by fileName.
 // the buffer IS null terminated
 // in *parentDirLength returns length in bytes of string (not counting null
@@ -297,7 +126,7 @@ DokanFreeCCB(__in PDokanCCB ccb) {
 //       \foo\bar\ bcomes \foo\
 //
 // if there is no parent, then it return STATUS_ACCESS_DENIED
-// if ExAllocatePool() fails, then it returns STATUS_INSUFFICIENT_RESOURCES
+// if DokanAlloc() fails, then it returns STATUS_INSUFFICIENT_RESOURCES
 // otherwise returns STATUS_SUCCESS
 
 NTSTATUS DokanGetParentDir(__in const WCHAR *fileName, __out WCHAR **parentDir,
@@ -322,12 +151,11 @@ NTSTATUS DokanGetParentDir(__in const WCHAR *fileName, __out WCHAR **parentDir,
 
   trailingSlash = fileName[len - 1] == '\\';
 
-  *parentDir = (WCHAR *)ExAllocatePool((len + 1) * sizeof(WCHAR));
+  *parentDir = (WCHAR *)DokanAllocZero((len + 1) * sizeof(WCHAR));
 
   if (!*parentDir)
     return STATUS_INSUFFICIENT_RESOURCES;
 
-  RtlZeroMemory(*parentDir, len + 1);
   RtlStringCchCopyW(*parentDir, len, fileName);
 
   for (i = len - 1; i >= 0; i--) {
@@ -356,15 +184,74 @@ NTSTATUS DokanGetParentDir(__in const WCHAR *fileName, __out WCHAR **parentDir,
   return STATUS_SUCCESS;
 }
 
-LONG DokanUnicodeStringChar(__in PUNICODE_STRING UnicodeString,
-                            __in WCHAR Char) {
-  ULONG i = 0;
-  for (; i < UnicodeString->Length / sizeof(WCHAR); ++i) {
-    if (UnicodeString->Buffer[i] == Char) {
-      return i;
-    }
+/*
+ * When the mount point is a reparse point (not a drive letter) on <= Win10
+ * 1803, file names in FILE_OBJECTs initially have an 'unparsed' portion that is
+ * all uppercase. This function changes them to the right case by getting it
+ * from an undocumented extra create parameter. See:
+ * https://community.osr.com/discussion/287522
+ */
+void FixFileNameForReparseMountPoint(__in const UNICODE_STRING *MountPoint,
+                                     __in PIRP Irp) {
+
+  if (!g_FixFileNameForReparseMountPoint) {
+    return;
   }
-  return -1;
+
+  // Only Revert when reparse point is used
+  if (IsMountPointDriveLetter(MountPoint)) {
+    return;
+  }
+
+  PECP_LIST ecpList;
+  struct SYMLINK_ECP_CONTEXT *ecpContext;
+  // IopSymlinkECPGuid "73d5118a-88ba-439f-92f4-46d38952d250";
+  static const GUID iopSymlinkECPGuid = {
+      0x73d5118a,
+      0x88ba,
+      0x439f,
+      {0x92, 0xf4, 0x46, 0xd3, 0x89, 0x52, 0xd2, 0x50}};
+
+  if (!NT_SUCCESS(FsRtlGetEcpListFromIrp(Irp, &ecpList)) || !ecpList) {
+    return;
+  }
+  if (!NT_SUCCESS(FsRtlFindExtraCreateParameter(ecpList, &iopSymlinkECPGuid,
+                                                (void **)&ecpContext, 0))) {
+    return;
+  }
+  if (FsRtlIsEcpFromUserMode(ecpContext) ||
+      !ecpContext->FlagsMountPoint.MountPoint.MountPoint) {
+    return;
+  }
+  USHORT unparsedNameLength = ecpContext->UnparsedNameLength;
+  if (unparsedNameLength == 0) {
+    return;
+  }
+
+  PUNICODE_STRING FileName =
+      &IoGetCurrentIrpStackLocation(Irp)->FileObject->FileName;
+  USHORT fileNameLength = FileName->Length;
+  USHORT ecpNameLength = ecpContext->Name.Length;
+  if (unparsedNameLength > ecpNameLength ||
+      unparsedNameLength > fileNameLength) {
+    return;
+  }
+
+  PWSTR unparsedNameInFileObject = (PWSTR)RtlOffsetToPointer(
+      FileName->Buffer, fileNameLength - unparsedNameLength);
+  UNICODE_STRING unparsedNameInFileObjectUS =
+      DokanWrapUnicodeString(unparsedNameInFileObject, unparsedNameLength);
+
+  PWSTR unparsedNameInEcp = (PWSTR)RtlOffsetToPointer(
+      ecpContext->Name.Buffer, ecpNameLength - unparsedNameLength);
+  UNICODE_STRING unparsedNameInEcpUS =
+      DokanWrapUnicodeString(unparsedNameInEcp, unparsedNameLength);
+
+  if (RtlEqualUnicodeString(&unparsedNameInFileObjectUS, &unparsedNameInEcpUS,
+                            /*CaseInSensitive=*/TRUE)) {
+    RtlCopyMemory(unparsedNameInFileObject, unparsedNameInEcp,
+                  unparsedNameLength);
+  }
 }
 
 VOID SetFileObjectForVCB(__in PFILE_OBJECT FileObject, __in PDokanVCB Vcb) {
@@ -374,8 +261,8 @@ VOID SetFileObjectForVCB(__in PFILE_OBJECT FileObject, __in PDokanVCB Vcb) {
 
 BOOL IsDokanProcessFiles(UNICODE_STRING FileName) {
   return (FileName.Length > 0 &&
-          (RtlEqualUnicodeString(&FileName, &keepAliveFileName, FALSE) ||
-           RtlEqualUnicodeString(&FileName, &notificationFileName, FALSE)));
+          (RtlEqualUnicodeString(&FileName, &g_KeepAliveFileName, FALSE) ||
+           RtlEqualUnicodeString(&FileName, &g_NotificationFileName, FALSE)));
 }
 
 NTSTATUS
@@ -400,7 +287,7 @@ Otherwise, STATUS_SHARING_VIOLATION is returned.
   NTSTATUS status;
   PAGED_CODE();
 
-  // Cannot open a flag with delete pending without share delete
+  // Cannot open a file with delete pending without share delete
   if ((FcbOrDcb->Identifier.Type == FCB) &&
       !FlagOn(ShareAccess, FILE_SHARE_DELETE) &&
       DokanFCBFlagsIsSet(FcbOrDcb, DOKAN_DELETE_ON_CLOSE))
@@ -497,6 +384,7 @@ Return Value:
   BOOLEAN EventContextConsumed = FALSE;
   DWORD disposition = 0;
   BOOLEAN fcbLocked = FALSE;
+  BOOLEAN caseInSensitive = TRUE;
   DOKAN_INIT_LOGGER(logger, DeviceObject->DriverObject, IRP_MJ_CREATE);
 
   PAGED_CODE();
@@ -543,6 +431,8 @@ Return Value:
 
     dcb = vcb->Dcb;
 
+    FixFileNameForReparseMountPoint(dcb->MountPoint, Irp);
+
     BOOLEAN isNetworkFileSystem =
         (dcb->VolumeDeviceType == FILE_DEVICE_NETWORK_FILE_SYSTEM);
 
@@ -558,15 +448,14 @@ Return Value:
       if (IsDokanProcessFiles(fileObject->FileName)) {
         DDbgPrint("  Dokan Process file called before startup finished\n");
       } else {
+        // We want to always dispatch non-root opens so we don't have to
+        // special-case anything here, but it needs a lot of testing.
         DDbgPrint("  Here we only go in if some antivirus software tries to "
                   "create files before startup is finished.\n");
         if (fileObject->FileName.Length > 0) {
           DDbgPrint("  Verify if the system tries to access System Volume\n");
-          UNICODE_STRING systemVolume;
-          RtlInitUnicodeString(&systemVolume, L"\\System Volume Information");
-          BOOLEAN isSystemVolumeAccess =
-              StartsWith(&fileObject->FileName, &systemVolume);
-          if (isSystemVolumeAccess) {
+          if (StartsWith(&fileObject->FileName,
+                         &systemVolumeInformationFileName)) {
             DDbgPrint("  It's an access to System Volume, so don't return "
                       "SUCCESS. We don't have one.\n");
             status = STATUS_NO_SUCH_FILE;
@@ -606,8 +495,8 @@ Return Value:
                     fileObject->FileName.Length);
     }
 
-    if (relatedFileObject != NULL // Get RelatedFileObject filename.
-        && relatedFileObject->FsContext2) {
+    // Get RelatedFileObject filename.
+    if (relatedFileObject != NULL && relatedFileObject->FsContext2) {
       // Using relatedFileObject->FileName is not safe here, use cached filename
       // from context.
       PDokanCCB relatedCcb = (PDokanCCB)relatedFileObject->FsContext2;
@@ -616,7 +505,7 @@ Return Value:
         DokanFCBLockRO(relatedFcb);
         if (relatedFcb->FileName.Length > 0 &&
             relatedFcb->FileName.Buffer != NULL) {
-          relatedFileName = ExAllocatePool(sizeof(UNICODE_STRING));
+          relatedFileName = DokanAlloc(sizeof(UNICODE_STRING));
           if (relatedFileName == NULL) {
             DDbgPrint("    Can't allocatePool for relatedFileName\n");
             status = STATUS_INSUFFICIENT_RESOURCES;
@@ -624,7 +513,7 @@ Return Value:
             __leave;
           }
           relatedFileName->Buffer =
-              ExAllocatePool(relatedFcb->FileName.MaximumLength);
+              DokanAlloc(relatedFcb->FileName.MaximumLength);
           if (relatedFileName->Buffer == NULL) {
             DDbgPrint("    Can't allocatePool for relatedFileName buffer\n");
             ExFreePool(relatedFileName);
@@ -675,8 +564,7 @@ Return Value:
       }
       if (relatedFileName->Length > 0 && fileObject->FileName.Length > 0 &&
           relatedFileName->Buffer[relatedFileName->Length / sizeof(WCHAR) -
-                                  1] != '\\' &&
-          fileObject->FileName.Buffer[0] != ':') {
+                                  1] != '\\' && fileObject->FileName.Buffer[0] != ':') {
         needBackSlashAfterRelatedFile = TRUE;
         fileNameLength += sizeof(WCHAR);
       }
@@ -693,23 +581,23 @@ Return Value:
 
     // don't open file like stream
     if (!dcb->UseAltStream &&
-        DokanUnicodeStringChar(&fileObject->FileName, L':') != -1) {
+        DokanSearchUnicodeStringChar(&fileObject->FileName, L':') != -1) {
       DDbgPrint("    alternate stream\n");
       status = STATUS_INVALID_PARAMETER;
       info = 0;
       __leave;
     }
 
+    caseInSensitive = !(dcb->MountOptions & DOKAN_EVENT_CASE_SENSITIVE);
+
     // this memory is freed by DokanGetFCB if needed
     // "+ sizeof(WCHAR)" is for the last NULL character
-    fileName = ExAllocatePool(fileNameLength + sizeof(WCHAR));
+    fileName = DokanAllocZero(fileNameLength + sizeof(WCHAR));
     if (fileName == NULL) {
       DDbgPrint("    Can't allocatePool for fileName\n");
       status = STATUS_INSUFFICIENT_RESOURCES;
       __leave;
     }
-
-    RtlZeroMemory(fileName, fileNameLength + sizeof(WCHAR));
 
     if (relatedFileName != NULL && !alternateDataStreamOfRootDir) {
       DDbgPrint("  RelatedFileName:%wZ\n", relatedFileName);
@@ -725,7 +613,7 @@ Return Value:
                         (needBackSlashAfterRelatedFile ? sizeof(WCHAR) : 0),
                     fileObject->FileName.Buffer, fileObject->FileName.Length);
     } else {
-      // if related file object is not specifed, copy the file name of file
+      // if related file object is not specified, copy the file name of file
       // object
       RtlCopyMemory(fileName, fileObject->FileName.Buffer,
                     fileObject->FileName.Length);
@@ -756,6 +644,7 @@ Return Value:
         OplockDebugRecordFlag(fcb, DOKAN_OPLOCK_DEBUG_CREATE_RETRIED);
         allocateCcb = FALSE;
         ExFreePool(fileName);
+        fileName = NULL;
       }
     }
     if (allocateCcb) {
@@ -767,11 +656,9 @@ Return Value:
           fileName = NULL;
           __leave;
         }
-        fcb = DokanGetFCB(vcb, parentDir, parentDirLength,
-                          FlagOn(irpSp->Flags, SL_CASE_SENSITIVE));
+        fcb = DokanGetFCB(vcb, parentDir, parentDirLength, caseInSensitive);
       } else {
-        fcb = DokanGetFCB(vcb, fileName, fileNameLength,
-                          FlagOn(irpSp->Flags, SL_CASE_SENSITIVE));
+        fcb = DokanGetFCB(vcb, fileName, fileNameLength, caseInSensitive);
       }
       if (fcb == NULL) {
         status = STATUS_INSUFFICIENT_RESOURCES;
@@ -805,13 +692,12 @@ Return Value:
     DokanFCBLockRW(fcb);
 
     if (irpSp->Flags & SL_OPEN_PAGING_FILE) {
+      // Paging file is not supported
+      // We would have otherwise set FSRTL_FLAG2_IS_PAGING_FILE
+      // and clear FSRTL_FLAG2_SUPPORTS_FILTER_CONTEXTS on
+      // fcb->AdvancedFCBHeader.Flags2
       status = STATUS_ACCESS_DENIED;
       __leave;
-      // Paging file is not supported
-      /*
-       fcb->AdvancedFCBHeader.Flags2 |= FSRTL_FLAG2_IS_PAGING_FILE;
-       fcb->AdvancedFCBHeader.Flags2 &= ~FSRTL_FLAG2_SUPPORTS_FILTER_CONTEXTS;
-       */
     }
 
     if (allocateCcb) {
@@ -1103,7 +989,8 @@ Return Value:
 
       if (!NT_SUCCESS(status)) {
 
-        DDbgPrint("   DokanCheckShareAccess failed with 0x%x\n", status);
+        DDbgPrint("   DokanCheckShareAccess failed with 0x%x %ls\n", status,
+                  DokanGetNTSTATUSStr(status));
 
         NTSTATUS OplockBreakStatus = STATUS_SUCCESS;
 
@@ -1145,8 +1032,8 @@ Return Value:
             //  we want to return that now.
             //
           } else if (!NT_SUCCESS(OplockBreakStatus)) {
-            DDbgPrint("   FsRtlOplockBreakH returned 0x%x\n",
-                      OplockBreakStatus);
+            DDbgPrint("   FsRtlOplockBreakH returned 0x%x %ls\n",
+                      OplockBreakStatus, DokanGetNTSTATUSStr(OplockBreakStatus));
             status = OplockBreakStatus;
             __leave;
 
@@ -1278,9 +1165,10 @@ Return Value:
       //
       if ((status != STATUS_SUCCESS) &&
           (status != STATUS_OPLOCK_BREAK_IN_PROGRESS)) {
-        DDbgPrint("   FsRtlOplockFsctrl failed with 0x%x, fcb = %p, "
-                  "fileCount = %lu\n",
-                  status, fcb, fcb->FileCount);
+        DDbgPrint(
+            "   FsRtlOplockFsctrl failed with 0x%x %ls, fcb = %p, "
+            "fileCount = %lu\n",
+            status, DokanGetNTSTATUSStr(status), fcb, fcb->FileCount);
 
         __leave;
       } else if (status == STATUS_OPLOCK_BREAK_IN_PROGRESS) {
@@ -1352,8 +1240,9 @@ Return Value:
       fileObject->FsContext2 = NULL;
     }
 
-    if (parentDir      // SL_OPEN_TARGET_DIRECTORY
-        && fileName) { // fcb owns parentDir, not fileName
+    // If it's SL_OPEN_TARGET_DIRECTORY then
+    // the FCB takes ownership of parentDir instead of fileName
+    if (parentDir && fileName) {
       ExFreePool(fileName);
     }
 
@@ -1453,8 +1342,8 @@ VOID DokanCompleteCreate(__in PIRP_ENTRY IrpEntry,
     DokanCCBFlagsSetBit(ccb, DOKAN_FILE_OPENED);
   }
 
-  // remember FILE_DELETE_ON_CLOSE so than the file can be deleted in close
-  // for windows 8
+  // On Windows 8 and above, you can mark the file
+  // for delete-on-close at create time, which is acted on during cleanup.
   if (NT_SUCCESS(status) &&
       irpSp->Parameters.Create.Options & FILE_DELETE_ON_CLOSE) {
     DokanFCBFlagsSetBit(fcb, DOKAN_DELETE_ON_CLOSE);
@@ -1475,8 +1364,8 @@ VOID DokanCompleteCreate(__in PIRP_ENTRY IrpEntry,
     }
     ccb->AtomicOplockRequestPending = FALSE;
   } else {
-    DDbgPrint("   IRP_MJ_CREATE failed. Free CCB:%p. Status 0x%x\n", ccb,
-              status);
+    DDbgPrint("   IRP_MJ_CREATE failed. Free CCB:%p. Status 0x%x %ls\n", ccb,
+              status, DokanGetNTSTATUSStr(status));
     DokanMaybeBackOutAtomicOplockRequest(ccb, irp);
     DokanFreeCCB(ccb);
     IoRemoveShareAccess(irpSp->FileObject, &fcb->ShareAccess);

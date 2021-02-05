@@ -1,6 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
+  Copyright (C) 2020 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -24,7 +25,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 /*
  * DefaultGetFileSecurity build a sddl of the current process user
  * with authenticate user rights for context menu. (New Folder, ...)
- * TODO - Only calcul one time the user group sid
+ * TODO - Only calculate the user's group sid once
  */
 NTSTATUS DefaultGetFileSecurity(LPCWSTR FileName,
                                 PSECURITY_INFORMATION SecurityInformation,
@@ -49,7 +50,7 @@ NTSTATUS DefaultGetFileSecurity(LPCWSTR FileName,
   DWORD returnLength;
   if (!GetTokenInformation(tokenHandle, TokenUser, buffer, sizeof(buffer),
                            &returnLength)) {
-    DbgPrint("  GetTokenInformaiton failed: %d\n", GetLastError());
+    DbgPrint("  GetTokenInformation failed: %d\n", GetLastError());
     CloseHandle(tokenHandle);
     return STATUS_NOT_IMPLEMENTED;
   }
@@ -63,7 +64,7 @@ NTSTATUS DefaultGetFileSecurity(LPCWSTR FileName,
 
   if (!GetTokenInformation(tokenHandle, TokenGroups, buffer, sizeof(buffer),
                            &returnLength)) {
-    DbgPrint("  GetTokenInformaiton failed: %d\n", GetLastError());
+    DbgPrint("  GetTokenInformation failed: %d\n", GetLastError());
     CloseHandle(tokenHandle);
     return STATUS_NOT_IMPLEMENTED;
   }
@@ -131,12 +132,11 @@ VOID DispatchQuerySecurity(HANDLE Handle, PEVENT_CONTEXT EventContext,
   PEVENT_INFORMATION eventInfo;
   DOKAN_FILE_INFO fileInfo;
   PDOKAN_OPEN_INFO openInfo;
-  ULONG eventInfoLength;
   NTSTATUS status = STATUS_NOT_IMPLEMENTED;
   ULONG lengthNeeded = 0;
+  ULONG eventInfoLength = DispatchGetEventInformationLength(
+      EventContext->Operation.Security.BufferLength);
 
-  eventInfoLength = sizeof(EVENT_INFORMATION) - 8 +
-                    EventContext->Operation.Security.BufferLength;
   CheckFileName(EventContext->Operation.Security.FileName);
 
   eventInfo = DispatchCommon(EventContext, eventInfoLength, DokanInstance,
@@ -175,7 +175,8 @@ VOID DispatchQuerySecurity(HANDLE Handle, PEVENT_CONTEXT EventContext,
     }
   }
 
-  SendEventInformation(Handle, eventInfo, eventInfoLength, DokanInstance);
+  SendEventInformation(Handle, eventInfo, eventInfoLength);
+  ReleaseDokanOpenInfo(eventInfo, &fileInfo, DokanInstance);
   free(eventInfo);
 }
 
@@ -184,11 +185,10 @@ VOID DispatchSetSecurity(HANDLE Handle, PEVENT_CONTEXT EventContext,
   PEVENT_INFORMATION eventInfo;
   DOKAN_FILE_INFO fileInfo;
   PDOKAN_OPEN_INFO openInfo;
-  ULONG eventInfoLength;
   NTSTATUS status = STATUS_NOT_IMPLEMENTED;
   PSECURITY_DESCRIPTOR securityDescriptor;
+  ULONG eventInfoLength = DispatchGetEventInformationLength(0);
 
-  eventInfoLength = sizeof(EVENT_INFORMATION);
   CheckFileName(EventContext->Operation.SetSecurity.FileName);
 
   eventInfo = DispatchCommon(EventContext, eventInfoLength, DokanInstance,
@@ -215,6 +215,7 @@ VOID DispatchSetSecurity(HANDLE Handle, PEVENT_CONTEXT EventContext,
     eventInfo->BufferLength = 0;
   }
 
-  SendEventInformation(Handle, eventInfo, eventInfoLength, DokanInstance);
+  SendEventInformation(Handle, eventInfo, eventInfoLength);
+  ReleaseDokanOpenInfo(eventInfo, &fileInfo, DokanInstance);
   free(eventInfo);
 }

@@ -1,8 +1,8 @@
 /*
   Dokan : user-mode file system library for Windows
 
+  Copyright (C) 2017 - 2020 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
-  Copyright (C) 2017 Google, Inc.
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
   http://dokan-dev.github.io
@@ -59,6 +59,7 @@ IOCTL_EVENT_INFO:
 */
 
 #include "dokan.h"
+#include "util/irp_buffer_helper.h"
 
 VOID SetCommonEventContext(__in PDokanDCB Dcb, __in PEVENT_CONTEXT EventContext,
                            __in PIRP Irp, __in_opt PDokanCCB Ccb) {
@@ -84,15 +85,20 @@ AllocateEventContextRaw(__in ULONG EventContextLength) {
   PDRIVER_EVENT_CONTEXT driverEventContext;
   PEVENT_CONTEXT eventContext;
 
+  if (EventContextLength < sizeof(EVENT_CONTEXT) ||
+      EventContextLength > MAXULONG - sizeof(DRIVER_EVENT_CONTEXT)) {
+    DDbgPrint(
+        " AllocateEventContextRaw invalid EventContextLength requested.\n");
+    return NULL;
+  }
+
   driverContextLength =
       EventContextLength - sizeof(EVENT_CONTEXT) + sizeof(DRIVER_EVENT_CONTEXT);
-  driverEventContext = ExAllocatePool(driverContextLength);
-
+  driverEventContext = DokanAllocZero(driverContextLength);
   if (driverEventContext == NULL) {
     return NULL;
   }
 
-  RtlZeroMemory(driverEventContext, driverContextLength);
   InitializeListHead(&driverEventContext->ListEntry);
 
   eventContext = &driverEventContext->EventContext;
@@ -217,8 +223,8 @@ VOID RetryIrps(__in PIRP_LIST PendingRetryIrp) {
   PLIST_ENTRY listHead;
   LIST_ENTRY retryList;
   PIRP_ENTRY irpEntry;
-  PDEVICE_OBJECT deviceObject;
   PIRP irp;
+  PDEVICE_OBJECT deviceObject = NULL;
 
   MoveIrpList(PendingRetryIrp, &retryList);
   while (!IsListEmpty(&retryList)) {
@@ -357,7 +363,7 @@ VOID NotificationThread(__in PVOID pDcb) {
 
   DDbgPrint("==> NotificationThread\n");
 
-  waitBlock = ExAllocatePool(sizeof(KWAIT_BLOCK) * 6);
+  waitBlock = DokanAlloc(sizeof(KWAIT_BLOCK) * 6);
   if (waitBlock == NULL) {
     DDbgPrint("  Can't allocate WAIT_BLOCK\n");
     return;
@@ -432,13 +438,26 @@ VOID DokanStopEventNotificationThread(__in PDokanDCB Dcb) {
   DDbgPrint("<== DokanStopEventNotificationThread\n");
 }
 
+VOID DokanCleanupAllChangeNotificationWaiters(__in PDokanVCB Vcb) {
+  DokanVCBLockRW(Vcb);
+  DOKAN_INIT_LOGGER(logger, Vcb->Dcb->DeviceObject->DriverObject, 0);
+  DokanLogInfo(&logger, L"Cleaning up all change notification waiters.");
+  FsRtlNotifyCleanupAll(Vcb->NotifySync, &Vcb->DirNotifyList);
+  DokanVCBUnlock(Vcb);
+}
+
+VOID DokanStopFcbGarbageCollectorThread(__in PDokanVCB Vcb) {
+  if (Vcb->FcbGarbageCollectorThread != NULL) {
+    KeWaitForSingleObject(Vcb->FcbGarbageCollectorThread, Executive, KernelMode,
+                          FALSE, NULL);
+    ObDereferenceObject(Vcb->FcbGarbageCollectorThread);
+    Vcb->FcbGarbageCollectorThread = NULL;
+  }
+}
+
 NTSTATUS DokanEventRelease(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
   PDokanDCB dcb;
   PDokanVCB vcb;
-  PDokanFCB fcb;
-  PDokanCCB ccb;
-  PLIST_ENTRY fcbEntry, fcbNext, fcbHead;
-  PLIST_ENTRY ccbEntry, ccbNext, ccbHead;
   NTSTATUS status = STATUS_SUCCESS;
   DOKAN_INIT_LOGGER(logger,
                     DeviceObject == NULL ? NULL
@@ -484,7 +503,7 @@ NTSTATUS DokanEventRelease(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
   SetLongFlag(dcb->Flags, DCB_DELETE_PENDING);
 
   DokanLogInfo(&logger, L"Starting unmount for device %wZ",
-               dcb->DiskDeviceName);
+                        dcb->DiskDeviceName);
 
   ReleasePendingIrp(&dcb->PendingIrp);
   ReleasePendingIrp(&dcb->PendingEvent);
@@ -492,35 +511,13 @@ NTSTATUS DokanEventRelease(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
   DokanStopCheckThread(dcb);
   DokanStopEventNotificationThread(dcb);
 
+  // Note that the garbage collector thread also gets signalled to stop by
+  // DokanStopEventNotificationThread. TODO(drivefs-team): maybe seperate out
+  // the signal to stop.
+  DokanStopFcbGarbageCollectorThread(vcb);
   ClearLongFlag(vcb->Flags, VCB_MOUNTED);
 
-  // search CCB list to complete not completed Directory Notification
-
-  DokanVCBLockRW(vcb);
-
-  fcbHead = &vcb->NextFCB;
-
-  for (fcbEntry = fcbHead->Flink; fcbEntry != fcbHead; fcbEntry = fcbNext) {
-
-    fcbNext = fcbEntry->Flink;
-    fcb = CONTAINING_RECORD(fcbEntry, DokanFCB, NextFCB);
-    DokanFCBLockRW(fcb);
-
-    ccbHead = &fcb->NextCCB;
-
-    for (ccbEntry = ccbHead->Flink; ccbEntry != ccbHead; ccbEntry = ccbNext) {
-      ccbNext = ccbEntry->Flink;
-      ccb = CONTAINING_RECORD(ccbEntry, DokanCCB, NextCCB);
-
-      DDbgPrint("  NotifyCleanup ccb:%p, context:%X, filename:%wZ\n", ccb,
-                (ULONG)ccb->UserContext, &fcb->FileName);
-      FsRtlNotifyCleanup(vcb->NotifySync, &vcb->DirNotifyList, ccb);
-    }
-    DokanFCBUnlock(fcb);
-  }
-
-  DokanVCBUnlock(vcb);
-
+  DokanCleanupAllChangeNotificationWaiters(vcb);
   IoReleaseRemoveLockAndWait(&dcb->RemoveLock, Irp);
 
   DokanDeleteDeviceObject(dcb);
@@ -546,7 +543,6 @@ ULONG GetCurrentSessionId(__in PIRP Irp) {
 NTSTATUS DokanGlobalEventRelease(__in PDEVICE_OBJECT DeviceObject,
                                  __in PIRP Irp) {
   PDOKAN_GLOBAL dokanGlobal;
-  PIO_STACK_LOCATION irpSp;
   PDOKAN_UNICODE_STRING_INTERMEDIATE szMountPoint;
   DOKAN_CONTROL dokanControl;
   PMOUNT_ENTRY mountEntry;
@@ -556,23 +552,9 @@ NTSTATUS DokanGlobalEventRelease(__in PDEVICE_OBJECT DeviceObject,
     return STATUS_INVALID_PARAMETER;
   }
 
-  irpSp = IoGetCurrentIrpStackLocation(Irp);
+  GET_IRP_UNICODE_STRING_INTERMEDIATE_OR_RETURN(Irp, szMountPoint)
 
-  if (irpSp->Parameters.DeviceIoControl.InputBufferLength <
-      sizeof(DOKAN_UNICODE_STRING_INTERMEDIATE)) {
-    DDbgPrint(
-        "Input buffer is too small (< DOKAN_UNICODE_STRING_INTERMEDIATE)\n");
-    return STATUS_BUFFER_TOO_SMALL;
-  }
-  szMountPoint =
-      (PDOKAN_UNICODE_STRING_INTERMEDIATE)Irp->AssociatedIrp.SystemBuffer;
-  if (irpSp->Parameters.DeviceIoControl.InputBufferLength <
-      sizeof(DOKAN_UNICODE_STRING_INTERMEDIATE) + szMountPoint->MaximumLength) {
-    DDbgPrint("Input buffer is too small\n");
-    return STATUS_BUFFER_TOO_SMALL;
-  }
-
-  RtlZeroMemory(&dokanControl, sizeof(dokanControl));
+  RtlZeroMemory(&dokanControl, sizeof(DOKAN_CONTROL));
   RtlStringCchCopyW(dokanControl.MountPoint, MAXIMUM_FILENAME_LENGTH,
                     L"\\DosDevices\\");
   if ((szMountPoint->Length / sizeof(WCHAR)) < 4) {
@@ -580,10 +562,11 @@ NTSTATUS DokanGlobalEventRelease(__in PDEVICE_OBJECT DeviceObject,
     dokanControl.MountPoint[13] = L':';
     dokanControl.MountPoint[14] = L'\0';
   } else {
-    if ((szMountPoint->Length / sizeof(WCHAR) + 12) > MAX_PATH) {
-      DDbgPrint("Montpoint Buffer has an invalid size\n");
+    if (szMountPoint->Length >
+        sizeof(dokanControl.MountPoint) - 12 * sizeof(WCHAR)) {
+      DDbgPrint("Mount point buffer has invalid size\n");
       return STATUS_BUFFER_OVERFLOW;
-	}
+    }
     RtlCopyMemory(&dokanControl.MountPoint[12], szMountPoint->Buffer,
                   szMountPoint->Length);
   }
@@ -597,14 +580,14 @@ NTSTATUS DokanGlobalEventRelease(__in PDEVICE_OBJECT DeviceObject,
     return STATUS_BUFFER_TOO_SMALL;
   }
 
-  if (IsDeletePending(mountEntry->MountControl.DeviceObject)) {
+  if (IsDeletePending(mountEntry->MountControl.VolumeDeviceObject)) {
     DDbgPrint("Device is deleted\n") return STATUS_DEVICE_REMOVED;
   }
 
-  if (!IsMounted(mountEntry->MountControl.DeviceObject)) {
+  if (!IsMounted(mountEntry->MountControl.VolumeDeviceObject)) {
     DDbgPrint("Device is still not mounted, so an unmount not possible at this "
               "point\n") return STATUS_DEVICE_BUSY;
   }
 
-  return DokanEventRelease(mountEntry->MountControl.DeviceObject, Irp);
+  return DokanEventRelease(mountEntry->MountControl.VolumeDeviceObject, Irp);
 }

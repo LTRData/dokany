@@ -1,8 +1,8 @@
 /*
   Dokan : user-mode file system library for Windows
 
+  Copyright (C) 2017 - 2020 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
-  Copyright (C) 2017 Google, Inc.
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
   http://dokan-dev.github.io
@@ -34,15 +34,16 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include <ntstrsafe.h>
 
 #include "public.h"
+#include "util/log.h"
 
 //
 // DEFINES
 //
 
-extern ULONG g_Debug;
 extern LOOKASIDE_LIST_EX g_DokanCCBLookasideList;
 extern LOOKASIDE_LIST_EX g_DokanFCBLookasideList;
 extern LOOKASIDE_LIST_EX g_DokanEResourceLookasideList;
+extern BOOLEAN g_FixFileNameForReparseMountPoint;
 
 // GetSystemRoutineAddress Function Pointer
 typedef NTKERNELAPI BOOLEAN DokanPtr_FsRtlCheckLockForOplockRequest(
@@ -56,43 +57,68 @@ extern DokanPtr_FsRtlCheckLockForOplockRequest
 extern DokanPtr_FsRtlAreThereWaitingFileLocks
     *DokanFsRtlAreThereWaitingFileLocks;
 
-#define DOKAN_GLOBAL_DEVICE_NAME L"\\Device\\Dokan_" DOKAN_MAJOR_API_VERSION
-#define DOKAN_GLOBAL_SYMBOLIC_LINK_NAME                                        \
-  L"\\DosDevices\\Global\\Dokan_" DOKAN_MAJOR_API_VERSION
-#define DOKAN_GLOBAL_FS_DISK_DEVICE_NAME                                       \
-  L"\\Device\\DokanFs" DOKAN_MAJOR_API_VERSION
-#define DOKAN_GLOBAL_FS_CD_DEVICE_NAME                                         \
-  L"\\Device\\DokanCdFs" DOKAN_MAJOR_API_VERSION
-
 #define DOKAN_DISK_DEVICE_NAME L"\\Device\\Volume"
 #define DOKAN_SYMBOLIC_LINK_NAME L"\\DosDevices\\Global\\Volume"
-#define DOKAN_NET_DEVICE_NAME                                                  \
-  L"\\Device\\DokanRedirector" DOKAN_MAJOR_API_VERSION
-#define DOKAN_NET_SYMBOLIC_LINK_NAME                                           \
-  L"\\DosDevices\\Global\\DokanRedirector" DOKAN_MAJOR_API_VERSION
 
+#ifndef DOKAN_DEVICE_PREFIX_NAME
+#define DOKAN_DEVICE_PREFIX_NAME L"Dokan"
+#endif
+#ifndef DOKAN_GLOBAL_DEVICE_NAME
+#define DOKAN_GLOBAL_DEVICE_NAME \
+  L"\\Device\\" DOKAN_DEVICE_PREFIX_NAME L"_" DOKAN_MAJOR_API_VERSION
+#endif
+#ifndef DOKAN_GLOBAL_SYMBOLIC_LINK_NAME
+#define DOKAN_GLOBAL_SYMBOLIC_LINK_NAME                                        \
+  L"\\DosDevices\\Global\\" \
+    DOKAN_DEVICE_PREFIX_NAME L"_" DOKAN_MAJOR_API_VERSION
+#endif
+#ifndef DOKAN_GLOBAL_FS_DISK_DEVICE_NAME
+#define DOKAN_GLOBAL_FS_DISK_DEVICE_NAME                                       \
+  L"\\Device\\" DOKAN_DEVICE_PREFIX_NAME L"Fs" DOKAN_MAJOR_API_VERSION
+#endif
+#ifndef DOKAN_GLOBAL_FS_CD_DEVICE_NAME
+#define DOKAN_GLOBAL_FS_CD_DEVICE_NAME                                         \
+  L"\\Device\\" DOKAN_DEVICE_PREFIX_NAME L"CdFs" DOKAN_MAJOR_API_VERSION
+#endif
+#ifndef DOKAN_NET_DEVICE_NAME
+#define DOKAN_NET_DEVICE_NAME                                                  \
+  L"\\Device\\" DOKAN_DEVICE_PREFIX_NAME L"Redirector" DOKAN_MAJOR_API_VERSION
+#endif
+#ifndef DOKAN_NET_SYMBOLIC_LINK_NAME
+#define DOKAN_NET_SYMBOLIC_LINK_NAME                                           \
+  L"\\DosDevices\\Global\\" \
+    DOKAN_DEVICE_PREFIX_NAME L"Redirector" DOKAN_MAJOR_API_VERSION
+#endif
+
+#ifndef VOLUME_LABEL
 #define VOLUME_LABEL L"DOKAN"
+#endif
+
 // {D6CC17C5-1734-4085-BCE7-964F1E9F5DE9}
+#ifndef DOKAN_BASE_GUID
 #define DOKAN_BASE_GUID                                                        \
   {                                                                            \
     0xd6cc17c5, 0x1734, 0x4085, {                                              \
       0xbc, 0xe7, 0x96, 0x4f, 0x1e, 0x9f, 0x5d, 0xe9                           \
     }                                                                          \
   }
+#endif
 
 #define TAG (ULONG)'AKOD'
 
 #define DOKAN_MDL_ALLOCATED 0x1
 
-#ifdef ExAllocatePool
-#undef ExAllocatePool
-#endif
-#define ExAllocatePool(size) ExAllocatePoolWithTag(NonPagedPool, size, TAG)
+#define DokanAlloc(size) ExAllocatePoolWithTag(NonPagedPool, size, TAG)
+
+inline PVOID DokanAllocZero(SIZE_T size) {
+  PVOID buffer = DokanAlloc(size);
+  if (buffer) { RtlZeroMemory(buffer, size); }
+  return buffer;
+}
 
 extern ULONG DokanMdlSafePriority;
 #define MmGetSystemAddressForMdlNormalSafe(mdl)                                \
-  MmGetSystemAddressForMdlSafe(mdl,                                            \
-                               NormalPagePriority | DokanMdlSafePriority)
+  MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority | DokanMdlSafePriority)
 
 #define DRIVER_CONTEXT_EVENT 2
 #define DRIVER_CONTEXT_IRP_ENTRY 3
@@ -102,21 +128,6 @@ extern ULONG DokanMdlSafePriority;
 #define DOKAN_CHECK_INTERVAL (1000 * 5)                     // in millisecond
 
 #define DOKAN_KEEPALIVE_TIMEOUT_DEFAULT (1000 * 15) // in millisecond
-
-#define DDbgPrint(...)                                                         \
-  if (g_Debug & DOKAN_DEBUG_DEFAULT) {                                         \
-    KdPrintEx(                                                                 \
-        (DPFLTR_IHVDRIVER_ID, DPFLTR_TRACE_LEVEL, "[DokanFS] " __VA_ARGS__));  \
-  }
-
-extern UNICODE_STRING FcbFileNameNull;
-#define DokanPrintFileName(FileObject)                                         \
-  DDbgPrint("  FileName: %wZ FCB.FileName: %wZ\n", &FileObject->FileName,      \
-            FileObject->FsContext2                                             \
-                ? (((PDokanCCB)FileObject->FsContext2)->Fcb                    \
-                       ? &((PDokanCCB)FileObject->FsContext2)->Fcb->FileName   \
-                       : &FcbFileNameNull)                                     \
-                : &FcbFileNameNull)
 
 extern NPAGED_LOOKASIDE_LIST DokanIrpEntryLookasideList;
 #define DokanAllocateIrpEntry()                                                \
@@ -142,11 +153,11 @@ extern NPAGED_LOOKASIDE_LIST DokanIrpEntryLookasideList;
 // Identifiers used to mark the structures
 //
 typedef enum _FSD_IDENTIFIER_TYPE {
-  DGL = ':DGL', // Dokan Global
-  DCB = ':DCB', // Disk Control Block
-  VCB = ':VCB', // Volume Control Block
-  FCB = ':FCB', // File Control Block
-  CCB = ':CCB', // Context Control Block
+  DGL = ':DGL',       // Dokan Global
+  DCB = ':DCB',       // Disk Control Block
+  VCB = ':VCB',       // Volume Control Block
+  FCB = ':FCB',       // File Control Block
+  CCB = ':CCB',       // Context Control Block
   FREED_FCB = ':FFC', // FCB that has been freed
 } FSD_IDENTIFIER_TYPE;
 
@@ -193,44 +204,13 @@ typedef struct _DOKAN_GLOBAL {
   LIST_ENTRY MountPointList;
   LIST_ENTRY DeviceDeleteList;
   KEVENT KillDeleteDeviceEvent;
+
+  // We try to avoid having race condition when switching the AutoMount flag of
+  // the MountManager. Yes, this only guarantee for dokan mount and it is still
+  // possible another process conflict with it but that the best we can do.
+  ERESOURCE MountManagerLock;
+
 } DOKAN_GLOBAL, *PDOKAN_GLOBAL;
-
-typedef struct _DOKAN_LOGGER {
-
-  PDRIVER_OBJECT DriverObject;
-  UCHAR MajorFunctionCode;
-
-} DOKAN_LOGGER, *PDOKAN_LOGGER;
-
-#define DOKAN_INIT_LOGGER(logger, driverObject, majorFunctionCode)             \
-  DOKAN_LOGGER logger;                                                         \
-  logger.DriverObject = driverObject;                                          \
-  logger.MajorFunctionCode = majorFunctionCode;
-
-// Logs an error to the Windows event log, even in production, with the given
-// status, and returns the status passed in.
-NTSTATUS DokanLogError(__in PDOKAN_LOGGER Logger,
-                       __in NTSTATUS Status,
-                       __in LPCTSTR Format,
-                       ...);
-
-// Logs an informational message to the Windows event log, even in production.
-VOID DokanLogInfo(__in PDOKAN_LOGGER Logger, __in LPCTSTR Format, ...);
-
-// A compact stack trace that can be easily logged.
-typedef struct _DokanBackTrace {
-  // The full address of a point-of-reference instruction near where the logging
-  // occurs. One should be able to find this instruction in the disassembly of
-  // the driver by seeing the log message content aside from this value. This
-  // value then tells you the absolute address of that instruction at runtime.
-  ULONG64 Address;
-
-  // Three return addresses truncated to their lowest 20 bits. The lowest 20
-  // bits of this value is the most distant return address, the next 20 bits are
-  // the next frame up, etc. To find each of the 3 instructions referenced here,
-  // one replaces the lowest 20 bits of Ip.
-  ULONG64 ReturnAddresses;
-} DokanBackTrace, *PDokanBackTrace;
 
 // make sure Identifier is the top of struct
 typedef struct _DokanDiskControlBlock {
@@ -257,6 +237,9 @@ typedef struct _DokanDiskControlBlock {
 
   PUNICODE_STRING DiskDeviceName;
   PUNICODE_STRING SymbolicLinkName;
+  // MountManager assigned a persistent symbolic link name
+  // during IOCTL_MOUNTDEV_LINK_CREATED
+  PUNICODE_STRING PersistentSymbolicLinkName;
   PUNICODE_STRING MountPoint;
   PUNICODE_STRING UNCName;
   LPWSTR VolumeLabel;
@@ -281,7 +264,6 @@ typedef struct _DokanDiskControlBlock {
   USHORT UseAltStream;
   USHORT UseMountManager;
   USHORT MountGlobally;
-  USHORT FileLockInUserMode;
 
   // to make a unique id for pending IRP
   ULONG SerialNumber;
@@ -296,18 +278,25 @@ typedef struct _DokanDiskControlBlock {
   ULONG IrpTimeout;
   ULONG SessionId;
   IO_REMOVE_LOCK RemoveLock;
-  // Whether to satisfy a name query like "bar" under "\foo" by finding an open
-  // FCB with \foo\bar as a prefix and copying the "bar" part from that. On
-  // Windows 7, this can save a lot of time, because the fileinfo.sys filter
-  // driver typically does a path normalization within CreateFile operations.
-  // The Filter Manager on Windows 7 normalizes paths by searching each parent
-  // for the name of each child. On newer versions of Windows, it does a
-  // one-shot FileNormalizedNameInformation query against the target file, so
-  // this type of directory search is not common.
-  BOOLEAN OptimizeSingleNameSearch;
+  
+  // Whether the mount manager has notified us of the actual assigned mount
+  // point yet.
+  BOOLEAN MountPointDetermined;
 
-  // Whether any oplock functionality should be disabled.
-  BOOLEAN OplocksDisabled;
+  // How often to garbage-collect FCBs. If this is 0, we use the historical
+  // default behavior of freeing them on the spot and in the current context
+  // when the FileCount reaches 0. If this is nonzero, then a background thread
+  // frees a list of FileCount == 0 FCBs at this interval, but requires them to
+  // have had FileCount == 0 for one whole interval before deleting them. The
+  // advantage of the GC approach is that it prevents filter drivers from
+  // exponentially slowing down procedures like zip file extraction due to
+  // repeatedly rebuilding state that they attach to the FCB header.
+  ULONG FcbGarbageCollectionIntervalMs;
+
+  // Contains mount options from user space. See DOKAN_EVENT_* in public.h
+  // for possible values.
+  ULONG MountOptions;
+
 } DokanDCB, *PDokanDCB;
 
 #define IS_DEVICE_READ_ONLY(DeviceObject)                                      \
@@ -356,9 +345,19 @@ typedef struct _DokanVolumeControlBlock {
   DokanResourceDebugInfo ResourceDebugInfo;
   DOKAN_LOGGER ResourceLogger;
 
+  // A mask that all Fcbs created for this volume match. We update this when we
+  // deal each one out. In practice, they all tend to have the same first 40
+  // bits on x64.
+  LONG64 ValidFcbMask;
+
   // Whether keep-alive has been activated on this volume.
   BOOLEAN IsKeepaliveActive;
 
+  PKTHREAD FcbGarbageCollectorThread;
+  LIST_ENTRY FcbGarbageList;
+  KEVENT FcbGarbageListNotEmpty;
+
+  VOLUME_METRICS VolumeMetrics;
 } DokanVCB, *PDokanVCB;
 
 // Flags for volume
@@ -481,9 +480,9 @@ typedef struct _DokanFileControlBlock {
   // turns the CreateFile into a CreateFile + CloseHandle + CreateFile sequence,
   // the hidden CloseHandle call doesn't trigger unmounting.
 
-  // TRUE if this FCB points to the keep-alive file name. This prevents the FCB
-  // from dispatching normally to user mode, but the IsKeepaliveActive flag must
-  // also be true in order for auto-unmounting to happen.
+  // TRUE if this FCB points to the keep-alive file name. This allows keepalive
+  // activation to happen on a particular CCB, which sets IsKeepaliveActive on
+  // that CCB and triggers unmount-on-cleanup behavior.
   BOOLEAN IsKeepalive;
 
   // If true, never dispatch requests to user mode for this handle. This is set
@@ -496,6 +495,17 @@ typedef struct _DokanFileControlBlock {
 
   // Info that is useful for troubleshooting oplock problems in a debugger.
   DokanOplockDebugInfo OplockDebugInfo;
+
+  // Used only when FCB garbage collection is enabled. This is the entry for
+  // this FCB in the VCB's list of FCBs that are ready for garbage collection.
+  // If it is in this list, then it is also in the usable FCB list. This is
+  // guarded by the VCB lock.
+  LIST_ENTRY NextGarbageCollectableFcb;
+
+  // Used only when FCB garbage collection is enabled, to ensure that the FCB
+  // has been scheduled for deletion long enough to actually delete it. This is
+  // owned by the VCB and guarded by the VCB lock.
+  BOOLEAN GarbageCollectionGracePeriodPassed;
 
 } DokanFCB, *PDokanFCB;
 
@@ -532,92 +542,120 @@ VOID DokanResourceUnlockWithDebugInfo(__in PERESOURCE Resource,
 #define DokanLockDebugEnabled()                                                \
   (g_Debug & DOKAN_DEBUG_LOCK)
 
-#define DokanFCBLockRW(fcb)                                                    \
-  if (DokanLockDebugEnabled()) {                                               \
-    DokanResourceLockWithDebugInfo(TRUE, (fcb)->AdvancedFCBHeader.Resource,    \
-                                   &(fcb)->ResourceDebugInfo,                  \
-                                   &(fcb)->Vcb->ResourceLogger,                \
-                                   DokanCallSiteID, &(fcb)->FileName, (fcb));  \
-  } else {                                                                     \
-    DokanResourceLockRW((fcb)->AdvancedFCBHeader.Resource);                    \
-  }
+#define DokanFCBLockRW(fcb)                                      \
+  if (DokanLockDebugEnabled()) {                                 \
+      DokanResourceLockWithDebugInfo(                            \
+          TRUE,                                                  \
+          (fcb)->AdvancedFCBHeader.Resource,                     \
+          &(fcb)->ResourceDebugInfo,                             \
+          &(fcb)->Vcb->ResourceLogger,                           \
+          DokanCallSiteID,                                       \
+          &(fcb)->FileName,                                      \
+          (fcb));                                                \
+    } else {                                                     \
+      DokanResourceLockRW((fcb)->AdvancedFCBHeader.Resource);    \
+    }
 
-#define DokanFCBLockRO(fcb)                                                    \
-  if (DokanLockDebugEnabled()) {                                               \
-    DokanResourceLockWithDebugInfo(FALSE, (fcb)->AdvancedFCBHeader.Resource,   \
-                                   &(fcb)->ResourceDebugInfo,                  \
-                                   &(fcb)->Vcb->ResourceLogger,                \
-                                   DokanCallSiteID, &(fcb)->FileName, (fcb));  \
-  } else {                                                                     \
-    DokanResourceLockRO((fcb)->AdvancedFCBHeader.Resource);                    \
-  }
+#define DokanFCBLockRO(fcb)                                      \
+  if (DokanLockDebugEnabled()) {                                 \
+      DokanResourceLockWithDebugInfo(                            \
+          FALSE,                                                 \
+          (fcb)->AdvancedFCBHeader.Resource,                     \
+          &(fcb)->ResourceDebugInfo,                             \
+          &(fcb)->Vcb->ResourceLogger,                           \
+          DokanCallSiteID,                                       \
+          &(fcb)->FileName,                                      \
+          (fcb));                                                \
+    } else {                                                     \
+      DokanResourceLockRO((fcb)->AdvancedFCBHeader.Resource);    \
+    }
 
-#define DokanFCBUnlock(fcb)                                                    \
-  if (DokanLockDebugEnabled()) {                                               \
-    DokanResourceUnlockWithDebugInfo((fcb)->AdvancedFCBHeader.Resource,        \
-                                     &(fcb)->ResourceDebugInfo);               \
-  } else {                                                                     \
-    DokanResourceUnlock((fcb)->AdvancedFCBHeader.Resource);                    \
-  }
+#define DokanFCBUnlock(fcb)                                      \
+  if (DokanLockDebugEnabled()) {                                 \
+      DokanResourceUnlockWithDebugInfo(                          \
+          (fcb)->AdvancedFCBHeader.Resource,                     \
+          &(fcb)->ResourceDebugInfo);                            \
+    } else {                                                     \
+      DokanResourceUnlock((fcb)->AdvancedFCBHeader.Resource);    \
+    }
 
-#define DokanPagingIoLockRW(fcb)                                               \
-  if (DokanLockDebugEnabled()) {                                               \
-    DokanResourceLockWithDebugInfo(TRUE, &(fcb)->PagingIoResource,             \
-                                   &(fcb)->PagingIoResourceDebugInfo,          \
-                                   &(fcb)->Vcb->ResourceLogger,                \
-                                   DokanCallSiteID, &(fcb)->FileName, (fcb));  \
-  } else {                                                                     \
-    DokanResourceLockRW(&(fcb)->PagingIoResource);                             \
-  }
+#define DokanPagingIoLockRW(fcb)                                 \
+  if (DokanLockDebugEnabled()) {                                 \
+      DokanResourceLockWithDebugInfo(                            \
+          TRUE,                                                  \
+          &(fcb)->PagingIoResource,                              \
+          &(fcb)->PagingIoResourceDebugInfo,                     \
+          &(fcb)->Vcb->ResourceLogger,                           \
+          DokanCallSiteID,                                       \
+          &(fcb)->FileName,                                      \
+          (fcb));                                                \
+    } else {                                                     \
+      DokanResourceLockRW(&(fcb)->PagingIoResource);             \
+    }
 
-#define DokanPagingIoLockRO(fcb)                                               \
-  if (DokanLockDebugEnabled()) {                                               \
-    DokanResourceLockWithDebugInfo(FALSE, &(fcb)->PagingIoResource,            \
-                                   &(fcb)->PagingIoResourceDebugInfo,          \
-                                   &(fcb)->Vcb->ResourceLogger,                \
-                                   DokanCallSiteID, &(fcb)->FileName, (fcb));  \
-  } else {                                                                     \
-    DokanResourceLockRO(&(fcb)->PagingIoResource);                             \
-  }
+#define DokanPagingIoLockRO(fcb)                                 \
+  if (DokanLockDebugEnabled()) {                                 \
+      DokanResourceLockWithDebugInfo(                            \
+          FALSE,                                                 \
+          &(fcb)->PagingIoResource,                              \
+          &(fcb)->PagingIoResourceDebugInfo,                     \
+          &(fcb)->Vcb->ResourceLogger,                           \
+          DokanCallSiteID,                                       \
+          &(fcb)->FileName,                                      \
+          (fcb));                                                \
+    } else {                                                     \
+      DokanResourceLockRO(&(fcb)->PagingIoResource);             \
+    }
 
-#define DokanPagingIoUnlock(fcb)                                               \
-  if (DokanLockDebugEnabled()) {                                               \
-    DokanResourceUnlockWithDebugInfo(&(fcb)->PagingIoResource,                 \
-                                     &(fcb)->PagingIoResourceDebugInfo);       \
-  } else {                                                                     \
-    DokanResourceUnlock(&(fcb)->PagingIoResource);                             \
-  }
+#define DokanPagingIoUnlock(fcb)                                 \
+  if (DokanLockDebugEnabled()) {                                 \
+      DokanResourceUnlockWithDebugInfo(                          \
+          &(fcb)->PagingIoResource,                              \
+          &(fcb)->PagingIoResourceDebugInfo);                    \
+    } else {                                                     \
+      DokanResourceUnlock(&(fcb)->PagingIoResource);             \
+    }
 
 // Locks the given VCB for read-write and returns TRUE, if it is not already
 // locked at all by another thread; otherwise returns FALSE.
 BOOLEAN DokanVCBTryLockRW(PDokanVCB vcb);
-#define DokanVCBLockRW(vcb)                                                    \
-  if (DokanLockDebugEnabled()) {                                               \
-    DokanResourceLockWithDebugInfo(TRUE, &(vcb)->Resource,                     \
-                                   &(vcb)->ResourceDebugInfo,                  \
-                                   &(vcb)->ResourceLogger, DokanCallSiteID,    \
-                                   (vcb)->Dcb->MountPoint, (vcb));             \
-  } else {                                                                     \
-    DokanResourceLockRW(&(vcb)->Resource);                                     \
-  }
 
-#define DokanVCBLockRO(vcb)                                                    \
-  if (DokanLockDebugEnabled()) {                                               \
-    DokanResourceLockWithDebugInfo(FALSE, &(vcb)->Resource,                    \
-                                   &(vcb)->ResourceDebugInfo,                  \
-                                   &(vcb)->ResourceLogger, DokanCallSiteID,    \
-                                   (vcb)->Dcb->MountPoint, (vcb));             \
-  } else {                                                                     \
-    DokanResourceLockRO(&(vcb)->Resource);                                     \
-  }
+#define DokanVCBLockRW(vcb)                                      \
+  if (DokanLockDebugEnabled()) {                                 \
+      DokanResourceLockWithDebugInfo(                            \
+          TRUE,                                                  \
+          &(vcb)->Resource,                                      \
+          &(vcb)->ResourceDebugInfo,                             \
+          &(vcb)->ResourceLogger,                                \
+          DokanCallSiteID,                                       \
+          (vcb)->Dcb->MountPoint,                                \
+          (vcb));                                                \
+    } else {                                                     \
+      DokanResourceLockRW(&(vcb)->Resource);                     \
+    }
 
-#define DokanVCBUnlock(vcb)                                                    \
-  if (DokanLockDebugEnabled()) {                                               \
-    DokanResourceUnlockWithDebugInfo(&(vcb)->Resource,                         \
-                                     &(vcb)->ResourceDebugInfo);               \
-  } else {                                                                     \
-    DokanResourceUnlock(&(vcb)->Resource);                                     \
-  }
+#define DokanVCBLockRO(vcb)                                      \
+  if (DokanLockDebugEnabled()) {                                 \
+      DokanResourceLockWithDebugInfo(                            \
+          FALSE,                                                 \
+          &(vcb)->Resource,                                      \
+          &(vcb)->ResourceDebugInfo,                             \
+          &(vcb)->ResourceLogger,                                \
+          DokanCallSiteID,                                       \
+          (vcb)->Dcb->MountPoint,                                \
+          (vcb));                                                \
+    } else {                                                     \
+      DokanResourceLockRO(&(vcb)->Resource);                     \
+    }
+
+#define DokanVCBUnlock(vcb)                                      \
+  if (DokanLockDebugEnabled()) {                                 \
+      DokanResourceUnlockWithDebugInfo(                          \
+          &(vcb)->Resource,                                      \
+          &(vcb)->ResourceDebugInfo);                            \
+    } else {                                                     \
+      DokanResourceUnlock(&(vcb)->Resource);                     \
+    }
 
 typedef struct _DokanContextControlBlock {
   // Locking: Read only field. No locking needed.
@@ -641,7 +679,7 @@ typedef struct _DokanContextControlBlock {
   // Locking: Read only field. No locking needed.
   ULONG MountId;
 
-  // Whether keep-alive has been activated on this volume.
+  // Whether keep-alive has been activated on this FCB.
   BOOLEAN IsKeepaliveActive;
 
   // Whether this CCB has a pending IRP_MJ_CREATE with
@@ -650,6 +688,9 @@ typedef struct _DokanContextControlBlock {
   // the IRP_MJ_CREATE does not succeed. The flag is cleared when the oplock
   // request is backed out.
   BOOLEAN AtomicOplockRequestPending;
+
+  // The process that created the CCB, for debugging purposes.
+  HANDLE ProcessId;
 } DokanCCB, *PDokanCCB;
 
 //
@@ -701,6 +742,25 @@ typedef struct _DRIVER_EVENT_CONTEXT {
   PKEVENT Completed;
   EVENT_CONTEXT EventContext;
 } DRIVER_EVENT_CONTEXT, *PDRIVER_EVENT_CONTEXT;
+
+// WARN: Undocumented Microsoft struct.
+// Extra create parameters (ECPs) for Symbolic link.
+// Used to get correct casing name when reparse point is used.
+#pragma warning(disable : 4214)
+struct SYMLINK_ECP_CONTEXT {
+  USHORT UnparsedNameLength;
+  union {
+    USHORT Flags;
+    struct {
+      USHORT MountPoint : 1;
+    } MountPoint;
+  } FlagsMountPoint;
+  USHORT DeviceNameLength;
+  USHORT Zero;
+  struct SYMLINK_ECP_CONTEXT *Reparsed;
+  UNICODE_STRING Name;
+};
+#pragma warning(default : 4214)
 
 DRIVER_INITIALIZE DriverEntry;
 
@@ -803,10 +863,6 @@ DRIVER_DISPATCH DokanResetPendingIrpTimeout;
 
 DRIVER_DISPATCH DokanGetAccessToken;
 
-LONG
-DokanUnicodeStringChar(__in PUNICODE_STRING UnicodeString,
-                            __in WCHAR Char);
-
 NTSTATUS
 DokanCheckShareAccess(_In_ PFILE_OBJECT FileObject, _In_ PDokanFCB FcbOrDcb,
                       _In_ ACCESS_MASK DesiredAccess, _In_ ULONG ShareAccess);
@@ -891,7 +947,7 @@ VOID DokanCompleteLock(__in PIRP_ENTRY IrpEntry,
                        __in PEVENT_INFORMATION EventInfo);
 
 VOID DokanCompleteQueryVolumeInformation(__in PIRP_ENTRY IrpEntry,
-                        __in PEVENT_INFORMATION EventInfo,
+                                         __in PEVENT_INFORMATION EventInfo,
                                          __in PDEVICE_OBJECT DeviceObject);
 
 VOID DokanCompleteFlush(__in PIRP_ENTRY IrpEntry,
@@ -914,9 +970,9 @@ DokanCreateGlobalDiskDevice(__in PDRIVER_OBJECT DriverObject,
 
 NTSTATUS
 DokanCreateDiskDevice(__in PDRIVER_OBJECT DriverObject, __in ULONG MountId,
-                      __in PWCHAR MountPoint, __in PWCHAR UNCName, 
-                      __in ULONG sessionID,
-                      __in PWCHAR BaseGuid, __in PDOKAN_GLOBAL DokanGlobal,
+                      __in PWCHAR MountPoint, __in PWCHAR UNCName,
+                      __in ULONG sessionID, __in PWCHAR BaseGuid,
+                      __in PDOKAN_GLOBAL DokanGlobal,
                       __in DEVICE_TYPE DeviceType,
                       __in ULONG DeviceCharacteristics,
                       __in BOOLEAN MountGlobally, __in BOOLEAN UseMountManager,
@@ -924,32 +980,61 @@ DokanCreateDiskDevice(__in PDRIVER_OBJECT DriverObject, __in ULONG MountId,
 
 VOID DokanInitVpb(__in PVPB Vpb, __in PDEVICE_OBJECT VolumeDevice);
 VOID DokanDeleteDeviceObject(__in PDokanDCB Dcb);
-NTSTATUS IsMountPointDriveLetter(__in PUNICODE_STRING mountPoint);
 VOID DokanDeleteMountPoint(__in PDokanDCB Dcb);
-VOID DokanPrintNTStatus(NTSTATUS Status);
+
+// Create FSCTL_SET_REPARSE_POINT payload request aim to be sent with
+// SendDirectoryFsctl.
+PCHAR CreateSetReparsePointRequest(__in PUNICODE_STRING SymbolicLinkName,
+                                   __out PULONG Length);
+
+// Create FSCTL_DELETE_REPARSE_POINT payload request aim to be sent with
+// SendDirectoryFsctl.
+PCHAR CreateRemoveReparsePointRequest(__out PULONG Length);
+
+// Open a Directory path and send a FsControl with the input buffer.
+NTSTATUS SendDirectoryFsctl(__in PDEVICE_OBJECT DeviceObject,
+                            __in PUNICODE_STRING Path, __in ULONG Code,
+                            __in PCHAR Input, __in ULONG Length);
+
+// Run function as System user and wait that it returns.
+VOID RunAsSystem(_In_ PKSTART_ROUTINE StartRoutine, PVOID StartContext);
 
 NTSTATUS DokanOplockRequest(__in PIRP *pIrp);
 NTSTATUS DokanCommonLockControl(__in PIRP Irp);
 
-NTSTATUS DokanRegisterUncProviderSystem(PDokanDCB dcb);
+// Register the UNCName to system multiple UNC provider.
+VOID DokanRegisterUncProvider(__in PVOID pDcb);
+
+// Use this instead of DokanCompleteIrpRequest, if the dispatch routine sets
+// Information as it goes (via PREPARE_OUTPUT etc.).
+VOID DokanCompleteDispatchRoutine(__in PIRP Irp, __in NTSTATUS Status);
+
+// Used at the end of dispatch routines that don't set Information as they go.
+// We want to reduce the usage and maybe get rid of this one. Note that it only
+// completes the actual IRP in the minority case where there's a final status
+// that did not require a user mode call.
 VOID DokanCompleteIrpRequest(__in PIRP Irp, __in NTSTATUS Status,
                              __in ULONG_PTR Info);
 
-VOID DokanNotifyReportChange0(__in PDokanFCB Fcb, __in PUNICODE_STRING FileName,
-                              __in ULONG FilterMatch, __in ULONG Action);
+// DokanNotifyReportChange* returns
+// - STATUS_OBJECT_NAME_INVALID if there appears to be an invalid name stored
+//   in the NotifyList.
+// - STATUS_INVALID_PARAMETER if the string passed in triggers an access
+//   violation.
+// - STATUS_SUCCESS otherwise.
+NTSTATUS DokanNotifyReportChange0(__in PDokanFCB Fcb,
+                                  __in PUNICODE_STRING FileName,
+                                  __in ULONG FilterMatch, __in ULONG Action);
 
-VOID DokanNotifyReportChange(__in PDokanFCB Fcb, __in ULONG FilterMatch,
-                             __in ULONG Action);
+NTSTATUS DokanNotifyReportChange(__in PDokanFCB Fcb, __in ULONG FilterMatch,
+                                 __in ULONG Action);
 
-PDokanFCB DokanAllocateFCB(__in PDokanVCB Vcb, __in PWCHAR FileName,
-                           __in ULONG FileNameLength);
+// Ends all pending waits for directory change notifications.
+VOID DokanCleanupAllChangeNotificationWaiters(__in PDokanVCB Vcb);
 
 // Backs out an atomic oplock request that was made in DokanDispatchCreate. This
 // should be called if the IRP for which the request was made is about to fail.
 VOID DokanMaybeBackOutAtomicOplockRequest(__in PDokanCCB Ccb, __in PIRP Irp);
-
-NTSTATUS
-DokanFreeFCB(__in PDokanVCB Vcb, __in PDokanFCB Fcb);
 
 PDokanCCB DokanAllocateCCB(__in PDokanDCB Dcb, __in PDokanFCB Fcb);
 
@@ -983,30 +1068,31 @@ BOOLEAN IsDeletePending(__in PDEVICE_OBJECT DeviceObject);
 
 BOOLEAN IsUnmountPendingVcb(__in PDokanVCB vcb);
 
-PMOUNT_ENTRY
-FindMountEntry(__in PDOKAN_GLOBAL dokanGlobal, __in PDOKAN_CONTROL DokanControl,
-               __in BOOLEAN lockGlobal);
+PMOUNT_ENTRY InsertMountEntry(PDOKAN_GLOBAL dokanGlobal,
+                              PDOKAN_CONTROL DokanControl,
+                              BOOLEAN lockGlobal);
 
-VOID PrintIdType(__in VOID *Id);
+PMOUNT_ENTRY FindMountEntry(__in PDOKAN_GLOBAL dokanGlobal,
+                            __in PDOKAN_CONTROL DokanControl,
+                            __in BOOLEAN lockGlobal);
+
+PMOUNT_ENTRY FindMountEntryByName(__in PDOKAN_GLOBAL DokanGlobal,
+                                  __in PUNICODE_STRING DiskDeviceName,
+                                  __in PUNICODE_STRING UNCName,
+                                  __in BOOLEAN LockGlobal);
 
 NTSTATUS
 DokanAllocateMdl(__in PIRP Irp, __in ULONG Length);
 
 VOID DokanFreeMdl(__in PIRP Irp);
 
-PUNICODE_STRING
-DokanAllocateUnicodeString(__in PCWSTR String);
-
-ULONG
-PointerAlignSize(ULONG sizeInBytes);
+ULONG PointerAlignSize(ULONG sizeInBytes);
 
 VOID DokanCreateMountPoint(__in PDokanDCB Dcb);
-NTSTATUS DokanSendVolumeArrivalNotification(PUNICODE_STRING DeviceName);
 
 VOID FlushFcb(__in PDokanFCB fcb, __in_opt PFILE_OBJECT fileObject);
-BOOLEAN StartsWith(__in PUNICODE_STRING str, __in PUNICODE_STRING prefix);
 
-PDEVICE_ENTRY 
+PDEVICE_ENTRY
 FindDeviceForDeleteBySessionId(PDOKAN_GLOBAL dokanGlobal, ULONG sessionId);
 
 BOOLEAN DeleteMountPointSymbolicLink(__in PUNICODE_STRING MountPoint);
@@ -1044,9 +1130,6 @@ __inline VOID DokanClearFlag(PULONG Flags, ULONG FlagBit) {
 #define DokanCCBFlagsIsSet DokanFCBFlagsIsSet
 #define DokanCCBFlagsSetBit DokanFCBFlagsSetBit
 #define DokanCCBFlagsClearBit DokanFCBFlagsClearBit
-
-ULONG DokanSearchWcharinUnicodeStringWithUlong(__in PUNICODE_STRING inputPUnicodeString, __in WCHAR targetWchar,
-	__in ULONG offsetPosition, __in int isIgnoreTargetWchar);
 
 // Logs the occurrence of the given type of IRP in the oplock debug info of the
 // FCB.

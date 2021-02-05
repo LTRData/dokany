@@ -1,8 +1,8 @@
 /*
   Dokan : user-mode file system library for Windows
 
+  Copyright (C) 2020 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
-  Copyright (C) 2017 Google, Inc.
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
   http://dokan-dev.github.io
@@ -55,12 +55,8 @@ NewDokanInstance() {
 
   ZeroMemory(instance, sizeof(DOKAN_INSTANCE));
 
-#if _MSC_VER < 1300
-  InitializeCriticalSection(&instance->CriticalSection);
-#else
   (void)InitializeCriticalSectionAndSpinCount(&instance->CriticalSection,
                                               0x80000400);
-#endif
 
   InitializeListHead(&instance->ListEntry);
 
@@ -161,9 +157,9 @@ void CheckAllocationUnitSectorSize(PDOKAN_OPTIONS DokanOptions) {
   ULONG sectorSize = DokanOptions->SectorSize;
 
   if ((allocationUnitSize < 512 || allocationUnitSize > 65536 ||
-       (allocationUnitSize & (allocationUnitSize - 1)) != 0) // Is power of tow
+       (allocationUnitSize & (allocationUnitSize - 1)) != 0) // Is power of two
       || (sectorSize < 512 || sectorSize > 65536 ||
-          (sectorSize & (sectorSize - 1)))) { // Is power of tow
+          (sectorSize & (sectorSize - 1)))) { // Is power of two
     // Reset to default if values does not fit windows FAT/NTFS value
     // https://support.microsoft.com/en-us/kb/140365
     DokanOptions->SectorSize = DOKAN_DEFAULT_SECTOR_SIZE;
@@ -284,7 +280,7 @@ int DOKANAPI DokanMain(PDOKAN_OPTIONS DokanOptions,
   StringCbPrintfW(keepalive_path, sizeof(keepalive_path), L"\\\\?%s%s",
                   instance->DeviceName, DOKAN_KEEPALIVE_FILE_NAME);
   HANDLE keepalive_handle =
-      CreateFile(keepalive_path, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+      CreateFile(keepalive_path, 0, 0, NULL, OPEN_EXISTING, 0, NULL);
   if (keepalive_handle == INVALID_HANDLE_VALUE) {
     // We don't consider this a fatal error because the keepalive handle is only
     // needed for abnormal termination cases anyway.
@@ -411,7 +407,7 @@ UINT WINAPI DokanLoop(PVOID pDokanInstance) {
   while (status) {
 
     device = CreateFile(rawDeviceName,                 // lpFileName
-                   GENERIC_READ | GENERIC_WRITE,       // dwDesiredAccess
+                   GENERIC_READ,       // dwDesiredAccess
                    FILE_SHARE_READ | FILE_SHARE_WRITE, // dwShareMode
                    NULL,                               // lpSecurityAttributes
                    OPEN_EXISTING,                      // dwCreationDistribution
@@ -526,14 +522,11 @@ UINT WINAPI DokanLoop(PVOID pDokanInstance) {
 }
 
 VOID SendEventInformation(HANDLE Handle, PEVENT_INFORMATION EventInfo,
-                          ULONG EventLength, PDOKAN_INSTANCE DokanInstance) {
+                          ULONG EventLength) {
   BOOL status;
   ULONG returnedLength;
 
   // DbgPrint("###EventInfo->Context %X\n", EventInfo->Context);
-  if (DokanInstance != NULL) {
-    ReleaseDokanOpenInfo(EventInfo, DokanInstance);
-  }
 
   // send event info to driver
   status = DeviceIoControl(Handle,           // Handle to device
@@ -568,6 +561,14 @@ VOID CheckFileName(LPWSTR FileName) {
   len = wcslen(FileName);
   if (len > 2 && FileName[len - 1] == L'\\')
     FileName[len - 1] = '\0';
+}
+
+ULONG DispatchGetEventInformationLength(ULONG bufferSize) {
+  // EVENT_INFORMATION has a buffer of size 8 already
+  // we remote it to the struct size and add the requested buffer size
+  // but we need at least to have enough space to set EVENT_INFORMATION
+  return max((ULONG)sizeof(EVENT_INFORMATION),
+             sizeof(EVENT_INFORMATION) - 8 + bufferSize);
 }
 
 PEVENT_INFORMATION
@@ -634,8 +635,10 @@ GetDokanOpenInfo(PEVENT_CONTEXT EventContext, PDOKAN_INSTANCE DokanInstance) {
 }
 
 VOID ReleaseDokanOpenInfo(PEVENT_INFORMATION EventInformation,
+                          PDOKAN_FILE_INFO FileInfo,
                           PDOKAN_INSTANCE DokanInstance) {
   PDOKAN_OPEN_INFO openInfo;
+  LPWSTR fileNameForClose = NULL;
   EnterCriticalSection(&DokanInstance->CriticalSection);
 
   openInfo = (PDOKAN_OPEN_INFO)(UINT_PTR)EventInformation->Context;
@@ -652,11 +655,21 @@ VOID ReleaseDokanOpenInfo(PEVENT_INFORMATION EventInformation,
         free(openInfo->StreamListHead);
         openInfo->StreamListHead = NULL;
       }
+      if (openInfo->FileName) {
+        fileNameForClose = openInfo->FileName;
+      }
       free(openInfo);
       EventInformation->Context = 0;
     }
   }
   LeaveCriticalSection(&DokanInstance->CriticalSection);
+
+  if (fileNameForClose) {
+    if (DokanInstance->DokanOperations->CloseFile) {
+      DokanInstance->DokanOperations->CloseFile(fileNameForClose, FileInfo);
+    }
+    free(fileNameForClose);
+  }
 }
 
 // ask driver to release all pending IRP to prepare for Unmount.
@@ -745,9 +758,15 @@ BOOL DokanStart(PDOKAN_INSTANCE Instance) {
   if (Instance->DokanOptions->Options & DOKAN_OPTION_DISABLE_OPLOCKS) {
     eventStart.Flags |= DOKAN_EVENT_DISABLE_OPLOCKS;
   }
+  if (Instance->DokanOptions->Options & DOKAN_OPTION_ENABLE_UNMOUNT_NETWORK_DRIVE) {
+    eventStart.Flags |= DOKAN_EVENT_ENABLE_NETWORK_UNMOUNT;
+  }
   if (Instance->DokanOptions->Options &
-      DOKAN_OPTION_OPTIMIZE_SINGLE_NAME_SEARCH) {
-    eventStart.Flags |= DOKAN_EVENT_OPTIMIZE_SINGLE_NAME_SEARCH;
+      DOKAN_OPTION_ENABLE_FCB_GARBAGE_COLLECTION) {
+    eventStart.Flags |= DOKAN_EVENT_ENABLE_FCB_GC;
+  }
+  if (Instance->DokanOptions->Options & DOKAN_OPTION_CASE_SENSITIVE) {
+    eventStart.Flags |= DOKAN_EVENT_CASE_SENSITIVE;
   }
 
   memcpy_s(eventStart.MountPoint, sizeof(eventStart.MountPoint),
@@ -869,6 +888,7 @@ PDOKAN_CONTROL DOKANAPI DokanGetMountPointList(BOOL uncOnly, PULONG nbRead) {
   *nbRead = returnedLength / sizeof(DOKAN_CONTROL);
   results = (PDOKAN_CONTROL)malloc(returnedLength);
   if (results != NULL) {
+    ZeroMemory(results, returnedLength);
     for (ULONG i = 0; i < *nbRead; ++i) {
       if (!uncOnly || wcscmp(dokanControl[i].UNCName, L"") != 0)
         CopyMemory(&results[i], &dokanControl[i], sizeof(DOKAN_CONTROL));
@@ -886,12 +906,8 @@ BOOL WINAPI DllMain(HINSTANCE Instance, DWORD Reason, LPVOID Reserved) {
 
   switch (Reason) {
   case DLL_PROCESS_ATTACH: {
-#if _MSC_VER < 1300
-    InitializeCriticalSection(&g_InstanceCriticalSection);
-#else
     (void)InitializeCriticalSectionAndSpinCount(&g_InstanceCriticalSection,
                                           0x80000400);
-#endif
 
     InitializeListHead(&g_InstanceList);
   } break;

@@ -1,6 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
+  Copyright (C) 2020 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -25,9 +26,9 @@ VOID DispatchFlush(HANDLE Handle, PEVENT_CONTEXT EventContext,
                    PDOKAN_INSTANCE DokanInstance) {
   DOKAN_FILE_INFO fileInfo;
   PEVENT_INFORMATION eventInfo;
-  ULONG sizeOfEventInfo = sizeof(EVENT_INFORMATION);
   PDOKAN_OPEN_INFO openInfo;
   NTSTATUS status;
+  ULONG sizeOfEventInfo = DispatchGetEventInformationLength(0);
 
   CheckFileName(EventContext->Operation.Flush.FileName);
 
@@ -55,7 +56,7 @@ VOID DispatchFlush(HANDLE Handle, PEVENT_CONTEXT EventContext,
   if (openInfo != NULL)
     openInfo->UserContext = fileInfo.Context;
 
-  SendEventInformation(Handle, eventInfo, sizeOfEventInfo, DokanInstance);
-
+  SendEventInformation(Handle, eventInfo, sizeOfEventInfo);
+  ReleaseDokanOpenInfo(eventInfo, &fileInfo, DokanInstance);
   free(eventInfo);
 }

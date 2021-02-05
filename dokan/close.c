@@ -1,6 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
+  Copyright (C) 2020 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -26,7 +27,7 @@ VOID DispatchClose(HANDLE Handle, PEVENT_CONTEXT EventContext,
   PEVENT_INFORMATION eventInfo;
   DOKAN_FILE_INFO fileInfo;
   PDOKAN_OPEN_INFO openInfo;
-  ULONG sizeOfEventInfo = sizeof(EVENT_INFORMATION);
+  ULONG sizeOfEventInfo = DispatchGetEventInformationLength(0);
 
   UNREFERENCED_PARAMETER(Handle);
 
@@ -38,21 +39,17 @@ VOID DispatchClose(HANDLE Handle, PEVENT_CONTEXT EventContext,
   eventInfo->Status = STATUS_SUCCESS; // return success at any case
 
   DbgPrint("###Close %04d\n", openInfo != NULL ? openInfo->EventId : -1);
-
-  if (DokanInstance->DokanOperations->CloseFile) {
-    // ignore return value
-    DokanInstance->DokanOperations->CloseFile(
-        EventContext->Operation.Close.FileName, &fileInfo);
-  }
-
-  // do not send it to the driver
-  // SendEventInformation(Handle, eventInfo, length);
+  
+  // Driver has simply notifying us of the Close request which he has
+  // already completed at this stage. Driver is not expecting us
+  // to reply from this so there is no need to send an EVENT_INFORMATION.
 
   if (openInfo != NULL) {
     EnterCriticalSection(&DokanInstance->CriticalSection);
+    openInfo->FileName = _wcsdup(EventContext->Operation.Close.FileName);
     openInfo->OpenCount--;
     LeaveCriticalSection(&DokanInstance->CriticalSection);
   }
-  ReleaseDokanOpenInfo(eventInfo, DokanInstance);
+  ReleaseDokanOpenInfo(eventInfo, &fileInfo, DokanInstance);
   free(eventInfo);
 }

@@ -1,8 +1,8 @@
 /*
   Dokan : user-mode file system library for Windows
 
+  Copyright (C) 2020 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
-  Copyright (C) 2017 Google, Inc.
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
   http://dokan-dev.github.io
@@ -21,6 +21,8 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "dokan.h"
+#include "util/irp_buffer_helper.h"
+#include "util/str.h"
 
 VOID DokanUnmount(__in PDokanDCB Dcb) {
   ULONG eventLength;
@@ -47,7 +49,7 @@ VOID DokanUnmount(__in PDokanDCB Dcb) {
 
   driverEventContext =
       CONTAINING_RECORD(eventContext, DRIVER_EVENT_CONTEXT, EventContext);
-  completedEvent = ExAllocatePool(sizeof(KEVENT));
+  completedEvent = DokanAlloc(sizeof(KEVENT));
   if (completedEvent) {
     KeInitializeEvent(completedEvent, NotificationEvent, FALSE);
     driverEventContext->Completed = completedEvent;
@@ -213,14 +215,14 @@ ReleaseTimeoutPendingIrp(__in PDokanDCB Dcb) {
         PDokanCCB ccb = fileObject->FsContext2;
         if (ccb != NULL) {
           PDokanFCB fcb = ccb->Fcb;
-          OplockDebugRecordFlag(fcb, canceled
-                                         ? DOKAN_OPLOCK_DEBUG_CANCELED_CREATE
-                                         : DOKAN_OPLOCK_DEBUG_TIMED_OUT_CREATE);
+          OplockDebugRecordFlag(
+              fcb, canceled ? DOKAN_OPLOCK_DEBUG_CANCELED_CREATE
+                            : DOKAN_OPLOCK_DEBUG_TIMED_OUT_CREATE);
         }
       }
-      DokanCancelCreateIrp(Dcb->DeviceObject, irpEntry,
-                           canceled ? STATUS_CANCELLED
-                                    : STATUS_INSUFFICIENT_RESOURCES);
+      DokanCancelCreateIrp(
+          Dcb->DeviceObject, irpEntry,
+          canceled ? STATUS_CANCELLED : STATUS_INSUFFICIENT_RESOURCES);
     } else {
       DokanCompleteIrpRequest(irp, STATUS_INSUFFICIENT_RESOURCES, 0);
     }
@@ -250,13 +252,12 @@ DokanResetPendingIrpTimeout(__in PDEVICE_OBJECT DeviceObject,
   PLIST_ENTRY thisEntry, nextEntry, listHead;
   PIRP_ENTRY irpEntry;
   PDokanVCB vcb;
-  PEVENT_INFORMATION eventInfo;
+  PEVENT_INFORMATION eventInfo = NULL;
   ULONG timeout; // in milisecond
 
   DDbgPrint("==> ResetPendingIrpTimeout\n");
 
-  eventInfo = (PEVENT_INFORMATION)Irp->AssociatedIrp.SystemBuffer;
-  ASSERT(eventInfo != NULL);
+  GET_IRP_BUFFER_OR_RETURN(Irp, eventInfo)
 
   timeout = eventInfo->Operation.ResetTimeout.Timeout;
   if (DOKAN_IRP_PENDING_TIMEOUT_RESET_MAX < timeout) {

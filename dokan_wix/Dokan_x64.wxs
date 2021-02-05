@@ -47,22 +47,6 @@
     <Property Id="MSIUNINSTALLSUPERSEDEDCOMPONENTS" Value="1" />
     <Property Id="INSTALLDEVFILES" Value="0" />
 
-    <Property Id="WIN10FOUND" Secure="yes">
-      <DirectorySearch Id="searchSystem" Path="[SystemFolder]" Depth="0">
-        <FileSearch Id="searchFile"
-                    Name="advapi32.dll"
-                    MinVersion="6.3.10000.0"/>
-      </DirectorySearch>
-    </Property>
-
-    <Property Id="UCRTINSTALLED" Secure="yes">
-      <DirectorySearch Id="searchSystem2" Path="[WindowsFolder]System32" Depth="0">
-        <FileSearch Id="UCRT_FileSearch"
-                    Name="ucrtbase.dll"
-                    MinVersion="6.2.10585.0"/>
-      </DirectorySearch>
-    </Property>
-
     <Property Id="WIN7KB3033929GDRINSTALLED" Secure="yes">
       <DirectorySearch Id="searchSystem3" Path="[SystemFolder]" Depth="0">
         <FileSearch Id="WINTRUSTGDR_FileSearch"
@@ -89,24 +73,6 @@
       </RegistrySearch>
     </Property>
 
-    <Property Id="VCREDISTINSTALLEDX64" Secure="yes">
-      <RegistrySearch Id="VCRedist_RegSearch_x64"
-                      Root="HKLM"
-                      Key="SOFTWARE\Microsoft\DevDiv\VC\Servicing\14.0\RuntimeMinimum"
-                      Name="Version"
-                      Type="raw"
-                      Win64="yes"/>
-    </Property>
-
-    <Property Id="VCREDISTINSTALLEDX86" Secure="yes">
-      <RegistrySearch Id="VCRedist_RegSearch_x86"
-                      Root="HKLM"
-                      Key="SOFTWARE\Microsoft\DevDiv\VC\Servicing\14.0\RuntimeMinimum"
-                      Name="Version"
-                      Type="raw"
-                      Win64="no"/>
-    </Property>
-
     <Property Id="DOKANSYSALREADYINSTALLED" Secure="yes">
       <DirectorySearch Id="Dokan.sys" Path="[System64Folder]\drivers">
         <FileSearch Name="dokan$(var.MajorVersion).sys" />
@@ -127,14 +93,9 @@
     <Condition Message="Installation failed because the 64-bit version of Dokan cannot be installed on a 32-bit version of Windows."><![CDATA[Installed OR VersionNT64]]></Condition>
     <Condition Message="Installation failed because your version of Windows is too old. Dokan requires Windows 7 SP1 or newer."><![CDATA[Installed OR VersionNT > 601 OR (VersionNT = 601 AND ServicePackLevel >= 1)]]></Condition>
     <Condition Message="Installation failed because Microsoft patch KB3033929 is not installed. A reboot is needed between the installation of said patch and the installation of [ProductName]. https://support.microsoft.com/en-us/kb/3033929"><![CDATA[Installed OR VersionNT > 601 OR (VersionNT = 601 AND (WIN7KB3033929GDRINSTALLED OR WIN7KB3033929LDRINSTALLED))]]></Condition>
-    <Condition Message="Installation failed because the VC++ 2019 x64 runtime minimum version $(var.VCRedistVersion) is not installed. You can download it here: https://www.visualstudio.com/downloads/#other"><![CDATA[Installed OR (VCREDISTINSTALLEDX64 AND VCREDISTINSTALLEDX64 >= "$(var.VCRedistVersion)")]]></Condition>
-    <Condition Message="Installation failed because the VC++ 2019 x86 runtime minimum version $(var.VCRedistVersion) is not installed. You can download it here: https://www.visualstudio.com/downloads/#other"><![CDATA[Installed OR (VCREDISTINSTALLEDX86 AND VCREDISTINSTALLEDX86 >= "$(var.VCRedistVersion)")]]></Condition>
-
     <Binary Id="SetupCA2" SourceFile="WiXCA\bin\$(var.Configuration)\WiXCA.dll"/>
 
     <CustomAction Id='CheckForRebootPending' Error="Installation failed because a Windows reboot is still pending after a Dokan driver uninstall." />
-
-    <CustomAction Id='CheckForUCRT' Error="Installation failed because the Universal C Runtime is not installed. Please run Windows Update and install all required Windows updates. You can download the UCRT separately from here: https://support.microsoft.com/en-us/kb/2999226" />
 
     <CustomAction Id="SetARPINSTALLLOCATION" Property="ARPINSTALLLOCATION" Value="[INSTALLDIR]" />
 
@@ -178,10 +139,6 @@
         <![CDATA[DOKANREBOOTPENDING = "#1"]]>
       </Custom>
 
-
-      <Custom Action='CheckForUCRT' Before='LaunchConditions'>
-        <![CDATA[Not REMOVE="ALL" AND Not PREVIOUSFOUND AND UCRTINSTALLED = ""]]>
-      </Custom>
       <Custom Action='GetInstallDir' Before='CostFinalize'><![CDATA[REMOVE="ALL"]]></Custom>
       <Custom Action="SetFolderValue" Before="ExecuteInstallAction" />
       <Custom Action='ExecuteInstallAction' After="PublishProduct"><![CDATA[Not REMOVE="ALL"]]></Custom>
@@ -254,6 +211,23 @@
                     <File Id="mirrorX86C" Source="..\samples\dokan_mirror\mirror.c" Name="mirror.c" KeyPath="no"/>
                   </Component>
                 </Directory>
+                <Directory Id="MEMFSX86DIR" Name="memfs">
+                  <Component Id="SampleMemFSFilesComponentX86" Win64="yes" Guid="{DC0CCB13-16C4-4B6A-A4E4-EF456E22CF10}">
+                    <File Id="memfsX86EXE" Source="..\Win32\$(var.Configuration)\memfs.exe" Name="memfs.exe" KeyPath="yes"/>
+                    <File Id="dokanMemFSX86DLL" Source="..\Win32\$(var.Configuration)\dokan$(var.MajorVersion).dll" Name="dokan$(var.MajorVersion).dll" KeyPath="no"/>
+                    <File Id="dokan_memfsX86vcxproj" Source="..\samples\dokan_memfs\dokan_memfs.vcxproj" Name="dokan_memfs.vcxproj" KeyPath="no"/>
+                    <File Id="filenodeX86CPP" Source="..\samples\dokan_memfs\filenode.cpp" Name="filenode.cpp" KeyPath="no"/>
+                    <File Id="filenodeX86H" Source="..\samples\dokan_memfs\filenode.h" Name="filenode.h" KeyPath="no"/>
+                    <File Id="filenodesX86CPP" Source="..\samples\dokan_memfs\filenodes.cpp" Name="filenodes.cpp" KeyPath="no"/>
+                    <File Id="filenodesX86H" Source="..\samples\dokan_memfs\filenodes.h" Name="filenodes.h" KeyPath="no"/>
+                    <File Id="mainX86CPP" Source="..\samples\dokan_memfs\main.cpp" Name="main.cpp" KeyPath="no"/>
+                    <File Id="memfsX86CPP" Source="..\samples\dokan_memfs\memfs.cpp" Name="memfs.cpp" KeyPath="no"/>
+                    <File Id="memfsX86H" Source="..\samples\dokan_memfs\memfs.h" Name="memfs.h" KeyPath="no"/>
+                    <File Id="memfs_helperX86H" Source="..\samples\dokan_memfs\memfs_helper.h" Name="memfs_helper.h" KeyPath="no"/>
+                    <File Id="memfs_operationsX86CPP" Source="..\samples\dokan_memfs\memfs_operations.cpp" Name="memfs_operations.cpp" KeyPath="no"/>
+                    <File Id="memfs_operationsX86H" Source="..\samples\dokan_memfs\memfs_operations.h" Name="memfs_operations.h" KeyPath="no"/>
+                  </Component>
+                </Directory>
                 <Directory Id="FUSEMIRRORX86DIR" Name="fuse_mirror">
                 </Directory>
               </Directory>
@@ -266,7 +240,7 @@
                 <difx:Driver AddRemovePrograms="no" DeleteFiles="yes" Legacy="yes"/>
               </Component>
               <Component Id="Driver_x64pdb" Guid="{184A5365-8C4C-4853-A9DA-381C0B12D8D1}">
-                <File Id="Driver_Syspdb" Source="..\x64\$(var.Configuration)\dokan$(var.MajorVersion).pdb" Name="dokan$(var.MajorVersion).pdb" KeyPath="yes"/>
+                <File Id="Driver_Syspdb" Source="..\x64\$(var.Configuration)\Driver\dokan$(var.MajorVersion).pdb" Name="dokan$(var.MajorVersion).pdb" KeyPath="yes"/>
               </Component>
             </Directory>
             <Directory Id="INCLUDEDIR" Name="include">
@@ -298,6 +272,23 @@
                   <File Id="dokanMirrorDLL" Source="..\x64\$(var.Configuration)\dokan$(var.MajorVersion).dll" Name="dokan$(var.MajorVersion).dll" KeyPath="no"/>
                   <File Id="dokan_mirrorvcxproj" Source="..\samples\dokan_mirror\dokan_mirror.vcxproj" Name="dokan_mirror.vcxproj" KeyPath="no"/>
                   <File Id="mirrorC" Source="..\samples\dokan_mirror\mirror.c" Name="mirror.c" KeyPath="no"/>
+                </Component>
+              </Directory>
+              <Directory Id="MEMFSDIR" Name="memfs">
+                <Component Id="SampleMemFSFilesComponent" Win64="yes" Guid="{DF735559-DE20-4FB2-8390-A2EB5F31706E}">
+                  <File Id="memfsEXE" Source="..\x64\$(var.Configuration)\memfs.exe" Name="memfs.exe" KeyPath="yes"/>
+                  <File Id="dokanMemFSDLL" Source="..\x64\$(var.Configuration)\dokan$(var.MajorVersion).dll" Name="dokan$(var.MajorVersion).dll" KeyPath="no"/>
+                  <File Id="dokan_memfsvcxproj" Source="..\samples\dokan_memfs\dokan_memfs.vcxproj" Name="dokan_memfs.vcxproj" KeyPath="no"/>
+                  <File Id="filenodeCPP" Source="..\samples\dokan_memfs\filenode.cpp" Name="filenode.cpp" KeyPath="no"/>
+                  <File Id="filenodeH" Source="..\samples\dokan_memfs\filenode.h" Name="filenode.h" KeyPath="no"/>
+                  <File Id="filenodesCPP" Source="..\samples\dokan_memfs\filenodes.cpp" Name="filenodes.cpp" KeyPath="no"/>
+                  <File Id="filenodesH" Source="..\samples\dokan_memfs\filenodes.h" Name="filenodes.h" KeyPath="no"/>
+                  <File Id="mainCPP" Source="..\samples\dokan_memfs\main.cpp" Name="main.cpp" KeyPath="no"/>
+                  <File Id="memfsCPP" Source="..\samples\dokan_memfs\memfs.cpp" Name="memfs.cpp" KeyPath="no"/>
+                  <File Id="memfsH" Source="..\samples\dokan_memfs\memfs.h" Name="memfs.h" KeyPath="no"/>
+                  <File Id="memfs_helperH" Source="..\samples\dokan_memfs\memfs_helper.h" Name="memfs_helper.h" KeyPath="no"/>
+                  <File Id="memfs_operationsCPP" Source="..\samples\dokan_memfs\memfs_operations.cpp" Name="memfs_operations.cpp" KeyPath="no"/>
+                  <File Id="memfs_operationsH" Source="..\samples\dokan_memfs\memfs_operations.h" Name="memfs_operations.h" KeyPath="no"/>
                 </Component>
               </Directory>
               <Directory Id="FUSEMIRRORDIR" Name="fuse_mirror">
@@ -347,6 +338,8 @@
         <ComponentRef Id="LibX86FilesComponent"/>
         <ComponentRef Id="SampleMirrorFilesComponent"/>
         <ComponentRef Id="SampleMirrorFilesComponentX86"/>
+        <ComponentRef Id="SampleMemFSFilesComponent"/>
+        <ComponentRef Id="SampleMemFSFilesComponentX86"/>
         <?if $(var.BuildCygwin)=true ?>
         <ComponentRef Id="SampleFuseCygwinFilesComponentX86" />
         <ComponentRef Id="SampleFuseMirrorCygwinComponent" />

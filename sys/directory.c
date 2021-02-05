@@ -1,8 +1,8 @@
 /*
   Dokan : user-mode file system library for Windows
 
+  Copyright (C) 2017 - 2020 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
-  Copyright (C) 2017 Google, Inc.
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
   http://dokan-dev.github.io
@@ -27,126 +27,6 @@ DokanQueryDirectory(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp);
 
 NTSTATUS
 DokanNotifyChangeDirectory(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp);
-
-// Finds an FCB whose path has the given prefix. The prefix should not end with
-// a backslash.
-// - An FCB for \foo\bar\abc\xyz could be returned for the prefix "\foo\bar".
-// - An FCB for \foo\barabcxyz would not be returned for the prefix "\foo\bar",
-//   because the prefix matching is in terms of whole path components.
-// - If there are multiple open matching FCBs, an arbitrary one is returned.
-// - If there are no open matching FCBs, the function returns NULL.
-// - If the function does not return NULL, the caller must call DokanFreeFCB
-//   when finished with it, in order for the FCB to ever be closed.
-static PDokanFCB DokanFindFCBWithPrefix(__in PDokanVCB Vcb,
-                                        __in const UNICODE_STRING* Prefix,
-                                        __in BOOLEAN CaseSensitive) {
-  PLIST_ENTRY thisEntry = NULL;
-  PLIST_ENTRY nextEntry = NULL;
-  PLIST_ENTRY listHead = &Vcb->NextFCB;
-  PDokanFCB fcb = NULL;
-  UNICODE_STRING matchablePart;
-  matchablePart.Length = Prefix->Length;
-  matchablePart.MaximumLength = Prefix->Length;
-  DokanVCBLockRW(Vcb);
-  for (thisEntry = listHead->Flink; thisEntry != listHead;
-       thisEntry = nextEntry) {
-    nextEntry = thisEntry->Flink;
-    fcb = CONTAINING_RECORD(thisEntry, DokanFCB, NextFCB);
-    if (fcb->FileName.Length == Prefix->Length ||
-        (fcb->FileName.Length > Prefix->Length &&
-            fcb->FileName.Buffer[Prefix->Length / sizeof(WCHAR)] == L'\\')) {
-      matchablePart.Buffer = fcb->FileName.Buffer;
-      if (RtlEqualUnicodeString(Prefix, &matchablePart, !CaseSensitive)) {
-        break;
-      }
-    }
-    fcb = NULL;
-  }
-  if (fcb != NULL) {
-    InterlockedIncrement(&fcb->FileCount);
-  }
-  DokanVCBUnlock(Vcb);
-  return fcb;
-}
-
-// Optimization for Windows 7 path normalization in the Filter Manager. See
-// the related DokanDCB flag for more info.
-static NTSTATUS DokanOptimizeSingleNameSearch(__in PIRP Irp,
-                                              __in PIO_STACK_LOCATION IrpSp,
-                                              __in PDokanVCB Vcb,
-                                              __in PDokanFCB DirectoryFcb) {
-  ULONG bufferLen = IrpSp->Parameters.QueryDirectory.Length;
-  const UNICODE_STRING* componentName =
-      IrpSp->Parameters.QueryDirectory.FileName;
-  if (bufferLen < sizeof(FILE_NAMES_INFORMATION) - 1 + componentName->Length) {
-    return STATUS_BUFFER_OVERFLOW;
-  }
-  if (!DokanVCBTryLockRW(Vcb)) {
-    return STATUS_INVALID_PARAMETER;
-  }
-  DokanFCBLockRO(DirectoryFcb);
-  NTSTATUS status = STATUS_SUCCESS;
-  PDokanFCB targetFcb = NULL;
-  UNICODE_STRING fullName;
-  fullName.Length = 0;
-  fullName.MaximumLength = DirectoryFcb->FileName.Length +
-      componentName->Length + sizeof(WCHAR);
-  fullName.Buffer = ExAllocatePool(fullName.MaximumLength);
-  __try {
-    PVOID buffer = Irp->UserBuffer;
-    if (Irp->MdlAddress) {
-      buffer = MmGetSystemAddressForMdlNormalSafe(Irp->MdlAddress);
-    }
-    RtlUnicodeStringCopy(&fullName, &DirectoryFcb->FileName);
-    if (fullName.Length == 0 ||
-        fullName.Buffer[(fullName.Length - 1) / sizeof(WCHAR)] != L'\\') {
-      RtlUnicodeStringCbCatStringN(&fullName, L"\\", 2 * sizeof(WCHAR));
-    }
-    RtlUnicodeStringCbCatN(&fullName, componentName, componentName->Length);
-    targetFcb = DokanFindFCBWithPrefix(Vcb, &fullName, TRUE);
-    if (targetFcb == NULL) {
-      status = STATUS_OBJECT_NAME_NOT_FOUND;
-      __leave;
-    }
-    FILE_NAMES_INFORMATION* output = (FILE_NAMES_INFORMATION*)buffer;
-    output->NextEntryOffset = 0;
-    // Note: this is not required to be unique or consistent.
-    output->FileIndex = 0;
-    output->FileNameLength = componentName->Length;
-    const WCHAR* realName = (const WCHAR*)((char*)targetFcb->FileName.Buffer +
-        fullName.Length - output->FileNameLength);
-    RtlCopyMemory(output->FileName, realName, output->FileNameLength);
-  } __finally {
-    ExFreePool(fullName.Buffer);
-    if (targetFcb != NULL) {
-      DokanFreeFCB(Vcb, targetFcb);
-    }
-    DokanFCBUnlock(DirectoryFcb);
-    DokanVCBUnlock(Vcb);
-  }
-  return status;
-}
-
-// This wrapper makes it easier to trace when the optimization happens. The
-// status returned is whether the optimization succeeds, and has no bearing on
-// whether the non-optimized path would succeed.
-static NTSTATUS
-DokanMaybeOptimizeSingleNameSearch(__in PIRP Irp,
-                                   __in PIO_STACK_LOCATION IrpSp,
-                                   __in PDokanVCB Vcb,
-                                   __in PDokanFCB DirectoryFcb) {
-  if (Vcb->Dcb == NULL || !Vcb->Dcb->OptimizeSingleNameSearch) {
-    return STATUS_INVALID_PARAMETER;
-  }
-  if (!(IrpSp->Flags & SL_RETURN_SINGLE_ENTRY)) {
-    return STATUS_INVALID_PARAMETER;
-  }
-  if (IrpSp->Parameters.QueryDirectory.FileInformationClass !=
-      FileNamesInformation) {
-    return STATUS_INVALID_PARAMETER;
-  }
-  return DokanOptimizeSingleNameSearch(Irp, IrpSp, Vcb, DirectoryFcb);
-}
 
 NTSTATUS
 DokanDispatchDirectoryControl(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
@@ -243,20 +123,26 @@ DokanQueryDirectory(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
   case FileDirectoryInformation:
     DDbgPrint("  FileDirectoryInformation\n");
     break;
-  case FileIdFullDirectoryInformation:
-    DDbgPrint("  FileIdFullDirectoryInformation\n");
-    break;
   case FileFullDirectoryInformation:
     DDbgPrint("  FileFullDirectoryInformation\n");
-    break;
-  case FileNamesInformation:
-    DDbgPrint("  FileNamesInformation\n");
     break;
   case FileBothDirectoryInformation:
     DDbgPrint("  FileBothDirectoryInformation\n");
     break;
+  case FileNamesInformation:
+    DDbgPrint("  FileNamesInformation\n");
+    break;
   case FileIdBothDirectoryInformation:
     DDbgPrint("  FileIdBothDirectoryInformation\n");
+    break;
+  case FileIdFullDirectoryInformation:
+    DDbgPrint("  FileIdFullDirectoryInformation\n");
+    break;
+  case FileIdExtdDirectoryInformation:
+    DDbgPrint("  FileIdExtdDirectoryInformation\n");
+    break;
+  case FileIdExtdBothDirectoryInformation:
+    DDbgPrint("  FileIdExtdBothDirectoryInformation\n");
     break;
   default:
     DDbgPrint("  unknown FileInfoClass %d\n",
@@ -268,10 +154,6 @@ DokanQueryDirectory(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
   ASSERT(fcb != NULL);
 
   OplockDebugRecordMajorFunction(fcb, IRP_MJ_DIRECTORY_CONTROL);
-  status = DokanMaybeOptimizeSingleNameSearch(Irp, irpSp, vcb, fcb);
-  if (status == STATUS_SUCCESS || status == STATUS_BUFFER_OVERFLOW) {
-    return status;
-  }
 
   // make a MDL for UserBuffer that can be used later on another thread context
   if (Irp->MdlAddress == NULL) {
@@ -303,15 +185,12 @@ DokanQueryDirectory(__in PDEVICE_OBJECT DeviceObject, __in PIRP Irp) {
       ccb->SearchPatternLength =
           irpSp->Parameters.QueryDirectory.FileName->Length;
       ccb->SearchPattern =
-          ExAllocatePool(ccb->SearchPatternLength + sizeof(WCHAR));
+          DokanAllocZero(ccb->SearchPatternLength + sizeof(WCHAR));
 
       if (ccb->SearchPattern == NULL) {
         DokanFCBUnlock(fcb);
         return STATUS_INSUFFICIENT_RESOURCES;
       }
-
-      RtlZeroMemory(ccb->SearchPattern,
-                    ccb->SearchPatternLength + sizeof(WCHAR));
 
       // copy provided search pattern to CCB
       RtlCopyMemory(ccb->SearchPattern,
@@ -456,7 +335,7 @@ VOID DokanCompleteDirectoryControl(__in PIRP_ENTRY IrpEntry,
   // usable buffer size
   bufferLen = irpSp->Parameters.QueryDirectory.Length;
 
-  // DDbgPrint("  !!Returning DirecotyInfo!!\n");
+  // DDbgPrint("  !!Returning DirectoryInfo!!\n");
 
   // buffer is not specified or short of length
   if (bufferLen == 0 || buffer == NULL || bufferLen < EventInfo->BufferLength) {
@@ -472,7 +351,6 @@ VOID DokanCompleteDirectoryControl(__in PIRP_ENTRY IrpEntry,
     // set the information received from user mode
     //
     ASSERT(buffer != NULL);
-
     RtlZeroMemory(buffer, bufferLen);
 
     // DDbgPrint("   copy DirectoryInfo\n");

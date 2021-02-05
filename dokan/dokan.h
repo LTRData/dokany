@@ -2,7 +2,7 @@
   Dokan : user-mode file system library for Windows
 
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
-  Copyright (C) 2017 Google, Inc.
+  Copyright (C) 2020 Google, Inc.
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
   http://dokan-dev.github.io
@@ -55,8 +55,8 @@ extern "C" {
  */
 /** @{ */
 
-/** The current Dokan version (ver 1.2.0). \ref DOKAN_OPTIONS.Version */
-#define DOKAN_VERSION 131
+/** The current Dokan version (140 means ver 1.4.0). \ref DOKAN_OPTIONS.Version */
+#define DOKAN_VERSION 141
 /** Minimum Dokan version (ver 1.1.0) accepted. */
 #define DOKAN_MINIMUM_COMPATIBLE_VERSION 110
 /** Driver file name including the DOKAN_MAJOR_API_VERSION */
@@ -87,7 +87,12 @@ extern "C" {
 #define DOKAN_OPTION_WRITE_PROTECT 8
 /** Use network drive - Dokan network provider needs to be installed */
 #define DOKAN_OPTION_NETWORK 16
-/** Use removable drive */
+/**
+ * Use removable drive
+ * Be aware that on some environments, the userland application will be denied
+ * to communicate with the drive which will result in a unwanted unmount.
+ * \see <a href="https://github.com/dokan-dev/dokany/issues/843">Issue #843</a>
+ */
 #define DOKAN_OPTION_REMOVABLE 32
 /** Use mount manager */
 #define DOKAN_OPTION_MOUNT_MANAGER 64
@@ -107,12 +112,20 @@ extern "C" {
  */
 #define DOKAN_OPTION_DISABLE_OPLOCKS 1024
 /**
- * Whether to satisfy a single-entry, name-only directory search without
- * dispatching to the FindFiles callback, if there is an open file from which
- * the driver can just copy the normalized name. These searches are frequently
- * done inside of CreateFile calls on Windows 7.
+ * The advantage of the FCB GC approach is that it prevents filter drivers (Anti-virus)
+ * from exponentially slowing down procedures like zip file extraction due to
+ * repeatedly rebuilding state that they attach to the FCB header.
  */
-#define DOKAN_OPTION_OPTIMIZE_SINGLE_NAME_SEARCH 2048
+#define DOKAN_OPTION_ENABLE_FCB_GARBAGE_COLLECTION 2048
+/**
+ * Enable Case sensitive path.
+ * By default all path are case insensitive.
+ * For case sensitive: \dir\File & \diR\file are different files
+ * but for case insensitive they are the same.
+ */
+#define DOKAN_OPTION_CASE_SENSITIVE 4096
+/** Allows unmounting of network drive via explorer */
+#define DOKAN_OPTION_ENABLE_UNMOUNT_NETWORK_DRIVE 8192
 
 /** @} */
 
@@ -141,6 +154,7 @@ typedef struct _DOKAN_OPTIONS {
    * Max timeout in milliseconds of each request before Dokan gives up to wait events to complete.
    * A timeout request is a sign that the userland implementation is no longer able to properly manage requests in time.
    * The driver will therefore unmount the device when a timeout trigger in order to keep the system stable.
+   * The default timeout value is 15 seconds.
    */
   ULONG Timeout;
   /** Allocation Unit Size of the volume. This will affect the file size. */
@@ -593,6 +607,10 @@ typedef struct _DOKAN_OPERATIONS {
   * Before these methods are called, \ref ZwCreateFile may not be called.
   * (ditto \ref CloseFile and \ref Cleanup)
   *
+  * VolumeName length can be anything that fit in the provided buffer.
+  * But some Windows component expect it to be no longer than 32 characters
+  * that why it is recommended to set a value under this limit.
+  *
   * FileSystemName could be anything up to 10 characters.
   * But Windows check few feature availability based on file system name.
   * For this, it is recommended to set NTFS or FAT here.
@@ -779,21 +797,6 @@ BOOL DOKANAPI DokanUnmount(WCHAR DriveLetter);
  * \return \c TRUE if device was unmounted or \c FALSE in case of failure or device not found.
  */
 BOOL DOKANAPI DokanRemoveMountPoint(LPCWSTR MountPoint);
-
-/**
- * \brief Unmount a Dokan device from a mount point
- *
- * Same as \ref DokanRemoveMountPoint
- * If Safe is \c TRUE, it will broadcast to all desktops and Shells
- * Safe should not be used during DLL_PROCESS_DETACH
- *
- * \see DokanRemoveMountPoint
- *
- * \param MountPoint Mount point to unmount ("Z", "Z:", "Z:\", "Z:\MyMountPoint").
- * \param Safe Process is not in DLL_PROCESS_DETACH state.
- * \return \c TRUE if device was unmounted or \c FALSE in case of failure or device not found.
- */
-BOOL DOKANAPI DokanRemoveMountPointEx(LPCWSTR MountPoint, BOOL Safe);
 
 /**
  * \brief Checks whether Name matches Expression

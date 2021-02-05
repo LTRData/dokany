@@ -3,6 +3,57 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](http://keepachangelog.com/) and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## [1.4.1.1000] - 2021-01-14
+### Added
+- Kernel/Library - Added support for `FileIdExtdDirectoryInformation`. Fixes directory listings under WSL2.
+- Kernel/Library - Add `DOKAN_OPTION_CASE_SENSITIVE` mount option.
+- Library - Add `DOKAN_OPTION_ENABLE_UNMOUNT_NETWORK_DRIVE` to allow unmounting network drive from explorer.
+- FUSE - Add removable drive option and use local drive as default type now.
+
+### Changed
+- Library - C++ redistributable dependencies is fully removed for this release.
+- Installer - Remove no longer needed dependency to KB2999226 (VC Redist).
+- Kernel - Change `DOKAN_CONTROL.VolumeDeviceObject` to `ULONG64` for other compiler than MSVC.
+- FUSE - Change default filesystem name to NTFS.
+
+### Fixed
+- Library - Reduce desired access rights for loop device handle and keepalive handle. Avoid some antivirus incompatibility.
+- Library - No longer wait for apps to answer `BroadcastSystemMessage` during mount.
+- Library - Return `STATUS_INVALID_PARAMETER` where appropriate. Fixes directory listings under WSL2.
+- FUSE - Incorrect convertion for MountPoint using chinese characters.
+- MemFS - Fix out of range read when the offset is bigger than the buffer.
+- MemFS - Always remove `FILE_ATTRIBUTE_NORMAL` as we set `FILE_ATTRIBUTE_ARCHIVE` before.
+- MemFS - Correctly handle current session option
+
+## [1.4.0.1000] - 2020-01-06
+### Added
+- MemFS - Add a new FS sample project: dokan_memfs. MemFS is a better example to debug and know the dokan driver/library feature supported and NTFS compliant. The FS pass most of WinFSTest and IFSTest. It looks to be stable enough to be included in the installer. It hasn't been test with real usage but it is expected to run without issue. MemFS is written in c++ and is under MIT license.
+- Installer - You can now find two installers with binaries built with and without VC redistributable. If no issue is reported, the next release will only have without the VC redistributable.
+- Kernel - Support directory path mount with mount manager. 
+- Kernel - Add `DokanAllocZero` that Alloc and ZeroMemory buffer size requested sys - Rename `ExAllocatePool` to `DokanAlloc`.
+- Kernel - Add Input IRP Buffer Help macro.
+- Kernel - Use `GET_IRP` for `Type3InputBuffer` and start using Output buffer function helpers for IRP.
+- FUSE - Add mount manager option.
+
+### Changed
+- Kernel - Replace `DOKAN_OPTION_OPTIMIZE_SINGLE_NAME_SEARCH` by `DOKAN_OPTION_ENABLE_FCB_GARBAGE_COLLECTION`. The advantage of the GC approach is that it prevents filter drivers from exponentially slowing down procedures like zip file extraction due to repeatedly rebuilding state that they attach to the FCB header.
+- Kernel - Multiple code refactoring.
+- Kernel - Move and Improve `FixFileNameForReparseMountPoint`.
+- Kernel - `FileNetworkPhysicalNameInformation` now return directly the FileName instead of sending the request to userland.
+- Kernel - `FileAllocationInformation` - return `STATUS_USER_MAPPED`_FILE when trying to truncate a memory mapped file.
+- Kernel - Do not rethrow exception during `EXCEPTION_EXECUTE_HANDLER`.
+- Kernel - During EventRelease directly call `FsRtlNotifyCleanupAll` instead of going through all Fcb & Ccb.
+- Kernel - Change `DokanPrintNTStatus` with limited number of `NTSTATUS` values print to use `DokanGetNTSTATUSStr`. `DokanGetNTSTATUSStr` use `ntstatus_log.inc` that has all ntstatus from <ntstatus.h>.
+- Library - Add support for compiling with GCC.
+- Library - Move `DokanRemoveMountPointEx` to internal header as it is not available to the public API.
+
+### Fixed
+- FUSE - Read keep local filename instance.
+- Installer - Fix incorrect pdb file copied for driver.
+- Library - `DokanNetworkProviderInstall` return earlier if a Reg failure happens and not corrupt the registry.
+- Kernel - Catch `FsRtlNotifyFullReportChange` `STATUS_ACCESS_VIOLATION` exception.
+- Library - Correct newName format when a stream name is renamed. 
+
 ## [1.3.1.1000] - 2019-12-16
 ### Added
 - Kernel - Added support for `FileIdExtdBothDirectoryInformation`, which is required when the target is mapped as a volume into docker containers.
@@ -443,6 +494,9 @@ Latest Dokan version from Hiroki Asakawa.
  [http://dokan-dev.net/en]( http://web.archive.org/web/20150419082954/http://dokan-dev.net/en/)
 
 
+[Unreleased]: https://github.com/dokan-dev/dokany/compare/v1.4.1.1000...master
+[1.4.1.1000]: https://github.com/dokan-dev/dokany/compare/v1.4.0.1000...v1.4.1.1000
+[1.4.0.1000]: https://github.com/dokan-dev/dokany/compare/v1.3.1.1000...v1.4.0.1000
 [1.3.1.1000]: https://github.com/dokan-dev/dokany/compare/v1.3.0.1000...v1.3.1.1000
 [1.3.0.1000]: https://github.com/dokan-dev/dokany/compare/v1.2.2.1000...v1.3.0.1000
 [1.2.2.1000]: https://github.com/dokan-dev/dokany/compare/v1.2.1.2000...v1.2.2.1000

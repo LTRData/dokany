@@ -1,7 +1,7 @@
 # Dokany
+[![Github All Releases](https://img.shields.io/github/downloads/dokan-dev/dokany/total.svg)](https://github.com/dokan-dev/dokany/releases)
 [![Build status](https://ci.appveyor.com/api/projects/status/4tpt4v8btyahh3le/branch/master?svg=true)](https://ci.appveyor.com/project/Maxhy/dokany/branch/master)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=dokany&metric=alert_status)](https://sonarcloud.io/dashboard?id=dokany)
-[![Coverity Scan](https://img.shields.io/coverity/scan/6789.svg)](https://scan.coverity.com/projects/dokan-dev-dokany)
 [![Codacy Badge](https://api.codacy.com/project/badge/Grade/43afb600ca75462e94d9484c32090135)](https://www.codacy.com/app/Liryna/dokany?utm_source=github.com&amp;utm_medium=referral&amp;utm_content=dokan-dev/dokany&amp;utm_campaign=Badge_Grade)
 [![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/1234/badge)](https://bestpractices.coreinfrastructure.org/projects/1234)
 [![FOSSA Status](https://app.fossa.io/api/projects/git%2Bgithub.com%2Fdokan-dev%2Fdokany.svg?type=shield)](https://app.fossa.io/projects/git%2Bgithub.com%2Fdokan-dev%2Fdokany?ref=badge_shield)
@@ -37,13 +37,13 @@ for more information.
 ## Licensing
 Dokan contains LGPL and MIT licensed programs.
 
-- user-mode library (dokan1.dll)  **LGPL**
-- driver (dokan1.sys)             **LGPL**
-- network library (dokannp1.dll)  **LGPL**
-- fuse library (dokanfuse1.dll)   **LGPL**
-- installer (DokanSetup.exe)      **LGPL**
-- control program (dokanctl.exe)  **MIT**
-- samples (mirror.c)              **MIT**
+- user-mode library (dokan1.dll)   **LGPL**
+- driver (dokan1.sys)              **LGPL**
+- network library (dokannp1.dll)   **LGPL**
+- fuse library (dokanfuse1.dll)    **LGPL**
+- installer (DokanSetup.exe)       **LGPL**
+- control program (dokanctl.exe)   **MIT**
+- samples (mirror.exe / memfs.exe) **MIT**
 
 For details, please check the license files.
  * **LGPL** license.lgpl.txt
@@ -53,15 +53,8 @@ You can obtain source files from https://dokan-dev.github.io
 
 ## Environment
 Dokan works on
- * Windows Server 2019
- * Windows Server 2016
- * Windows 10
- * Windows Server 2012 R2
- * Windows 8.1
- * Windows Server 2012
- * Windows 8
- * Windows Server 2008 R2 SP1
- * Windows 7 SP1
+ * Windows Server 2019 / 2016 / 2012 (R2) / 2008 R2 SP1
+ * Windows 10 / 8.1 / 8 / 7 SP1
  
 Platform
  * x86
@@ -95,13 +88,12 @@ advantage of this approach is that it allows programmers to develop file systems
 in user mode which is safe and easy to debug.
  
 To learn more about Dokan file system development, see the
-[![API documentation](https://img.shields.io/badge/Documentation-API-green.svg)](https://dokan-dev.github.io/dokany-doc/html/).
+[![API documentation](https://img.shields.io/badge/Documentation-API-green.svg)](https://dokan-dev.github.io/dokany-doc/html/) and the [samples](https://github.com/dokan-dev/dokany/tree/master/samples), especially [dokan_memfs](https://github.com/dokan-dev/dokany/tree/master/samples/dokan_memfs).
 
 ## Build
 In short, download and install the
-[Visual Studio 2019](https://www.visualstudio.com/en-us/downloads/download-visual-studio-vs.aspx)
-with [SDK 10](https://dev.windows.com/en-us/downloads/windows-10-sdk) &
-[WDK 10](https://msdn.microsoft.com/en-us/windows/hardware/hh852365.aspx)
+[Visual Studio 2019](https://www.visualstudio.com/en-us/downloads/download-visual-studio-vs.aspx), select [Windows 10 SDK](https://developer.microsoft.com/en-us/windows/downloads/windows-10-sdk/) component during the install or from the Tools menu &
+install the [WDK 10](https://msdn.microsoft.com/en-us/windows/hardware/hh852365.aspx)
 
 For details, see the
 [build page](https://github.com/dokan-dev/dokany/wiki/Build).
@@ -120,4 +112,5 @@ Detect defects and report them on
 [GitHub issue tracker](https://github.com/dokan-dev/dokany/issues).
 
 Ask and answer questions on
+[Github Discussions](https://github.com/dokan-dev/dokany/discussions) or 
 [Google discussion group](https://groups.google.com/forum/#!forum/dokan).

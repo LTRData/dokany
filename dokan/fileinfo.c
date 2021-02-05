@@ -1,6 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
+  Copyright (C) 2020 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -52,6 +53,7 @@ NTSTATUS
 DokanFillFileStandardInfo(PFILE_STANDARD_INFORMATION StandardInfo,
                           PBY_HANDLE_FILE_INFORMATION FileInfo,
                           PULONG RemainingLength,
+                          PDOKAN_FILE_INFO DokanFileInfo,
                           PDOKAN_INSTANCE DokanInstance) {
   if (*RemainingLength < sizeof(FILE_STANDARD_INFORMATION)) {
     return STATUS_BUFFER_OVERFLOW;
@@ -64,7 +66,7 @@ DokanFillFileStandardInfo(PFILE_STANDARD_INFORMATION StandardInfo,
   StandardInfo->EndOfFile.HighPart = FileInfo->nFileSizeHigh;
   StandardInfo->EndOfFile.LowPart = FileInfo->nFileSizeLow;
   StandardInfo->NumberOfLinks = FileInfo->nNumberOfLinks;
-  StandardInfo->DeletePending = FALSE;
+  StandardInfo->DeletePending = DokanFileInfo->DeleteOnClose;
   StandardInfo->Directory = FALSE;
 
   if (FileInfo->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
@@ -115,6 +117,7 @@ NTSTATUS
 DokanFillFileAllInfo(PFILE_ALL_INFORMATION AllInfo,
                      PBY_HANDLE_FILE_INFORMATION FileInfo,
                      PULONG RemainingLength, PEVENT_CONTEXT EventContext,
+                     PDOKAN_FILE_INFO DokanFileInfo,
                      PDOKAN_INSTANCE DokanInstance) {
   ULONG allRemainingLength = *RemainingLength;
 
@@ -127,7 +130,7 @@ DokanFillFileAllInfo(PFILE_ALL_INFORMATION AllInfo,
 
   // FileStandardInformation
   DokanFillFileStandardInfo(&AllInfo->StandardInformation, FileInfo,
-                            RemainingLength, DokanInstance);
+                            RemainingLength, DokanFileInfo, DokanInstance);
 
   // FileInternalInformation
   DokanFillInternalInfo(&AllInfo->InternalInformation, FileInfo,
@@ -419,10 +422,8 @@ VOID DispatchQueryInformation(HANDLE Handle, PEVENT_CONTEXT EventContext,
   ULONG remainingLength;
   NTSTATUS status = STATUS_INVALID_PARAMETER;
   PDOKAN_OPEN_INFO openInfo;
-  ULONG sizeOfEventInfo;
-
-  sizeOfEventInfo =
-      sizeof(EVENT_INFORMATION) - 8 + EventContext->Operation.File.BufferLength;
+  ULONG sizeOfEventInfo = DispatchGetEventInformationLength(
+      EventContext->Operation.File.BufferLength);
 
   CheckFileName(EventContext->Operation.File.FileName);
 
@@ -481,14 +482,14 @@ VOID DispatchQueryInformation(HANDLE Handle, PEVENT_CONTEXT EventContext,
       DbgPrint("\tFileStandardInformation\n");
       status = DokanFillFileStandardInfo(
           (PFILE_STANDARD_INFORMATION)eventInfo->Buffer, &byHandleFileInfo,
-          &remainingLength, DokanInstance);
+          &remainingLength, &fileInfo, DokanInstance);
       break;
 
     case FileAllInformation:
       DbgPrint("\tFileAllInformation\n");
       status = DokanFillFileAllInfo((PFILE_ALL_INFORMATION)eventInfo->Buffer,
                                     &byHandleFileInfo, &remainingLength,
-                                    EventContext, DokanInstance);
+                                    EventContext, &fileInfo, DokanInstance);
       break;
 
     case FileAlternateNameInformation:
@@ -562,6 +563,7 @@ VOID DispatchQueryInformation(HANDLE Handle, PEVENT_CONTEXT EventContext,
   if (openInfo != NULL)
     openInfo->UserContext = fileInfo.Context;
 
-  SendEventInformation(Handle, eventInfo, sizeOfEventInfo, DokanInstance);
+  SendEventInformation(Handle, eventInfo, sizeOfEventInfo);
+  ReleaseDokanOpenInfo(eventInfo, &fileInfo, DokanInstance);
   free(eventInfo);
 }
