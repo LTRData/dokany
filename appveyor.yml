@@ -14,7 +14,7 @@
       WLK_INST_CACHE: '%DOKAN_CI_CACHE%\wlk_inst'
       DOKAN_MAIN_BUILD_JOB_NAME: "Image: Visual Studio 2019; Configuration: All"
 
-  version: 1.4.0-{build}
+  version: 1.4.1-{build}
   configuration:
   - All
   - SonarQube
@@ -67,7 +67,7 @@
         if ($env:CONFIGURATION -eq "FsTest") {
           & verifier /standard /driver dokan1.sys
           Write-Host "Before reboot"
-          Start-Sleep -s 2
+          Start-Sleep -s 30 # Wait appveyor to be ready https://github.com/appveyor/ci/issues/3650
           Restart-Computer
           Start-Sleep -s 240 # will reboot before this is finished and proceed with next build step
           Write-Host "Did not reboot for some reason, trying Restart-Computer -Force"
@@ -202,9 +202,10 @@
         cd sonar-scanner
         Invoke-WebRequest https://sonarcloud.io/static/cpp/build-wrapper-win-x86.zip -OutFile .\build-wrapper-win-x86.zip
         Exec-External { & 7z e .\build-wrapper-win-x86.zip }
-        Invoke-WebRequest https://github.com/SonarSource/sonar-scanner-msbuild/releases/download/4.9.0.17385/sonar-scanner-msbuild-4.9.0.17385-net46.zip -OutFile .\sonar-scanner-msbuild.zip
+        Invoke-WebRequest https://github.com/SonarSource/sonar-scanner-msbuild/releases/download/5.0.4.24009/sonar-scanner-msbuild-5.0.4.24009-net46.zip -OutFile .\sonar-scanner-msbuild.zip
         Exec-External { & 7z x .\sonar-scanner-msbuild.zip }
-        $env:Path += ";$((Get-Location).Path)"
+        $env:Path = "$((Get-Location).Path);" + $env:Path
+        $env:JAVA_HOME = "C:\Program Files\Java\jdk15"
         cd ..
 
         .\scripts\sonar-build.ps1 dokany $env:SonarQubeToken dokan-dev https://sonarcloud.io $env:APPVEYOR_BUILD_VERSION
@@ -221,7 +222,7 @@
       $installer_version = $env:APPVEYOR_BUILD_VERSION.Split("-")[0] + '.' + $mm_version;
   - ps: |
       if ($env:CONFIGURATION -eq "All") {
-        $env:Path = $env:Path + ";C:\Program Files (x86)\WiX Toolset v3.11;C:\Program Files (x86)\Windows Kits\10\bin\10.0.18362.0\x64\"
+        $env:Path += ";C:\Program Files (x86)\WiX Toolset v3.11;C:\Program Files (x86)\Windows Kits\10\bin\10.0.18362.0\x64\"
         $env:CERTISSUER="DokanCA"
         $env:ADDITIONALCERT="$pwd\cert\DokanCA.cer"
         $env:SIGNTOOL="C:\Program Files (x86)\Windows Kits\10\bin\10.0.18362.0\x64\signtool.exe"

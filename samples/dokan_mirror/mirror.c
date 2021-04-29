@@ -33,6 +33,9 @@ THE SOFTWARE.
 #include <stdlib.h>
 #include <winbase.h>
 
+// Enable Long Paths on Windows 10 version 1607 and later by changing
+// the OS configuration (see Microsoft own documentation for the steps)
+// and rebuild the mirror with the following line uncommented.
 //#define WIN10_ENABLE_LONG_PATH
 #ifdef WIN10_ENABLE_LONG_PATH
 //dirty but should be enough
@@ -1408,11 +1411,6 @@ static NTSTATUS DOKAN_CALLBACK MirrorDokanGetDiskFreeSpace(
     PULONGLONG FreeBytesAvailable, PULONGLONG TotalNumberOfBytes,
     PULONGLONG TotalNumberOfFreeBytes, PDOKAN_FILE_INFO DokanFileInfo) {
   UNREFERENCED_PARAMETER(DokanFileInfo);
-
-  DWORD SectorsPerCluster;
-  DWORD BytesPerSector;
-  DWORD NumberOfFreeClusters;
-  DWORD TotalNumberOfClusters;
   WCHAR DriveLetter[3] = {'C', ':', 0};
   PWCHAR RootPathName;
 
@@ -1423,14 +1421,13 @@ static NTSTATUS DOKAN_CALLBACK MirrorDokanGetDiskFreeSpace(
     RootPathName = DriveLetter;
   }
 
-  GetDiskFreeSpace(RootPathName, &SectorsPerCluster, &BytesPerSector,
-                   &NumberOfFreeClusters, &TotalNumberOfClusters);
-  *FreeBytesAvailable =
-      ((ULONGLONG)SectorsPerCluster) * BytesPerSector * NumberOfFreeClusters;
-  *TotalNumberOfFreeBytes =
-      ((ULONGLONG)SectorsPerCluster) * BytesPerSector * NumberOfFreeClusters;
-  *TotalNumberOfBytes =
-      ((ULONGLONG)SectorsPerCluster) * BytesPerSector * TotalNumberOfClusters;
+  if (!GetDiskFreeSpaceExW(RootPathName, (PULARGE_INTEGER)FreeBytesAvailable,
+                           (PULARGE_INTEGER)TotalNumberOfBytes,
+                           (PULARGE_INTEGER)TotalNumberOfFreeBytes)) {
+    DWORD error = GetLastError();
+    DbgPrint(L"GetDiskFreeSpaceEx failed for path %ws", RootPathName);
+    return DokanNtStatusFromWin32(error);
+  }
   return STATUS_SUCCESS;
 }
 
@@ -1555,10 +1552,10 @@ void ShowUsage() {
           "  /a Allocation unit size (ex. /a 512)\t\t Allocation Unit Size of the volume. This will behave on the disk file size.\n"
           "  /k Sector size (ex. /k 512)\t\t\t Sector Size of the volume. This will behave on the disk file size.\n"
           "  /f User mode Lock\t\t\t\t Enable Lockfile/Unlockfile operations. Otherwise Dokan will take care of it.\n"
-          "  /e Disable OpLocks\t\t\t\t Disable OpLocks kernel operations. Otherwise Dokan will take care of it.\n"
-          "  /i (Timeout in Milliseconds ex. /i 30000)\t Timeout until a running operation is aborted and the device is unmounted.\n"
-          "  /z Enabled FCB GC. Might speed up on env with filter drivers (Anti-virus) slowing down the system.\n"
-          "  /x (network unmount)\t\t\t Allows unmounting network drive from file explorer\n\n"
+          "  /i Timeout in Milliseconds (ex. /i 30000)\t Timeout until a running operation is aborted and the device is unmounted.\n"
+          "  /z Enabled FCB GCt\t\t\t\t Might speed up on env with filter drivers (Anti-virus) slowing down the system.\n"
+          "  /x Network unmount\t\t\t\t Allows unmounting network drive from file explorer.\n"
+          "  /e Enable Driver Logs\t\t\t\t Forward Driver logs to userland.\n\n"
           "Examples:\n"
           "\tmirror.exe /r C:\\Users /l M:\t\t\t# Mirror C:\\Users as RootDirectory into a drive of letter M:\\.\n"
           "\tmirror.exe /r C:\\Users /l C:\\mount\\dokan\t# Mirror C:\\Users as RootDirectory into NTFS folder C:\\mount\\dokan.\n"
@@ -1640,14 +1637,14 @@ int __cdecl wmain(ULONG argc, PWCHAR argv[]) {
     case L'f':
       dokanOptions.Options |= DOKAN_OPTION_FILELOCK_USER_MODE;
       break;
-    case L'e':
-      dokanOptions.Options |= DOKAN_OPTION_DISABLE_OPLOCKS;
-      break;
     case L'z':
       dokanOptions.Options |= DOKAN_OPTION_ENABLE_FCB_GARBAGE_COLLECTION;
       break;
     case L'x':
       dokanOptions.Options |= DOKAN_OPTION_ENABLE_UNMOUNT_NETWORK_DRIVE;
+      break;
+    case L'e':
+      dokanOptions.Options |= DOKAN_OPTION_DISPATCH_DRIVER_LOGS;
       break;
     case L'b':
       // Only work when mirroring a folder with setCaseSensitiveInfo option enabled on win10

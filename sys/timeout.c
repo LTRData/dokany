@@ -1,7 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2020 Google, Inc.
+  Copyright (C) 2020 - 2021 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -24,99 +24,38 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include "util/irp_buffer_helper.h"
 #include "util/str.h"
 
-VOID DokanUnmount(__in PDokanDCB Dcb) {
-  ULONG eventLength;
-  PEVENT_CONTEXT eventContext;
-  PDRIVER_EVENT_CONTEXT driverEventContext;
-  PKEVENT completedEvent;
-  LARGE_INTEGER timeout;
+VOID DokanUnmount(__in_opt PREQUEST_CONTEXT RequestContext, __in PDokanDCB Dcb) {
   PDokanVCB vcb = Dcb->Vcb;
-  ULONG deviceNamePos;
 
-  DDbgPrint("==> DokanUnmount\n");
-
-  eventLength = sizeof(EVENT_CONTEXT);
-  eventContext = AllocateEventContextRaw(eventLength);
-
-  if (eventContext == NULL) {
-    ; // STATUS_INSUFFICIENT_RESOURCES;
-    DDbgPrint(" Not able to allocate eventContext.\n");
-    if (vcb) {
-      DokanEventRelease(vcb->DeviceObject, NULL);
-    }
-    return;
-  }
-
-  driverEventContext =
-      CONTAINING_RECORD(eventContext, DRIVER_EVENT_CONTEXT, EventContext);
-  completedEvent = DokanAlloc(sizeof(KEVENT));
-  if (completedEvent) {
-    KeInitializeEvent(completedEvent, NotificationEvent, FALSE);
-    driverEventContext->Completed = completedEvent;
-  }
-
-  deviceNamePos = Dcb->SymbolicLinkName->Length / sizeof(WCHAR) - 1;
-  deviceNamePos = DokanSearchWcharinUnicodeStringWithUlong(
-      Dcb->SymbolicLinkName, L'\\', deviceNamePos, 0);
-
-  RtlStringCchCopyW(eventContext->Operation.Unmount.DeviceName,
-                    sizeof(eventContext->Operation.Unmount.DeviceName) /
-                        sizeof(WCHAR),
-                    &(Dcb->SymbolicLinkName->Buffer[deviceNamePos]));
-
-  DDbgPrint("  Send Unmount to Service : %ws\n",
-            eventContext->Operation.Unmount.DeviceName);
-
-  DokanEventNotification(&Dcb->Global->NotifyService, eventContext);
-
-  if (completedEvent) {
-    timeout.QuadPart = -1 * 10 * 1000 * 10; // 10 sec
-    KeWaitForSingleObject(completedEvent, Executive, KernelMode, FALSE,
-                          &timeout);
-  }
-
+  DOKAN_LOG("Start");
   if (vcb) {
-    DokanEventRelease(vcb->DeviceObject, NULL);
+    DokanEventRelease(RequestContext, vcb->DeviceObject);
   }
-
-  if (completedEvent) {
-    ExFreePool(completedEvent);
-  }
-
-  DDbgPrint("<== DokanUnmount\n");
+  DOKAN_LOG("End");
 }
 
 VOID DokanCheckKeepAlive(__in PDokanDCB Dcb) {
   LARGE_INTEGER tickCount;
   PDokanVCB vcb;
 
-  // DDbgPrint("==> DokanCheckKeepAlive\n");
-
   KeEnterCriticalRegion();
   KeQueryTickCount(&tickCount);
   ExAcquireResourceSharedLite(&Dcb->Resource, TRUE);
 
   if (Dcb->TickCount.QuadPart < tickCount.QuadPart) {
-
     vcb = Dcb->Vcb;
-
     ExReleaseResourceLite(&Dcb->Resource);
-
-    DDbgPrint("  Timeout reached so perform an umount\n");
-
+    DOKAN_LOG("Timeout reached so perform an umount");
     if (IsUnmountPendingVcb(vcb)) {
-      DDbgPrint("  Volume is not mounted\n");
+      DOKAN_LOG("Volume is not mounted");
       KeLeaveCriticalRegion();
       return;
     }
-    DokanUnmount(Dcb);
-
+    DokanUnmount(NULL, Dcb);
   } else {
     ExReleaseResourceLite(&Dcb->Resource);
   }
-
   KeLeaveCriticalRegion();
-  // DDbgPrint("<== DokanCheckKeepAlive\n");
 }
 
 NTSTATUS
@@ -131,7 +70,7 @@ ReleaseTimeoutPendingIrp(__in PDokanDCB Dcb) {
   PDokanVCB vcb = Dcb->Vcb;
   DOKAN_INIT_LOGGER(logger, Dcb->DeviceObject->DriverObject, 0);
 
-  DDbgPrint("==> ReleaseTimeoutPendingIRP\n");
+  DOKAN_LOG("Start");
   InitializeListHead(&completeList);
 
   ASSERT(KeGetCurrentIrql() <= DISPATCH_LEVEL);
@@ -140,7 +79,7 @@ ReleaseTimeoutPendingIrp(__in PDokanDCB Dcb) {
   // when IRP queue is empty, there is nothing to do
   if (IsListEmpty(&Dcb->PendingIrp.ListHead)) {
     KeReleaseSpinLock(&Dcb->PendingIrp.ListLock, oldIrql);
-    DDbgPrint("  IrpQueue is Empty\n");
+    DOKAN_LOG("IrpQueue is Empty");
     return STATUS_SUCCESS;
   }
 
@@ -168,15 +107,15 @@ ReleaseTimeoutPendingIrp(__in PDokanDCB Dcb) {
 
     RemoveEntryList(thisEntry);
 
-    DDbgPrint(" timeout Irp #%X\n", irpEntry->SerialNumber);
+    DOKAN_LOG_("Timeout Irp %p", irpEntry->SerialNumber);
 
-    irp = irpEntry->Irp;
+    irp = irpEntry->RequestContext.Irp;
 
-    // Create IRPs are special in that this routine is always their place of
-    // effective cancellation. So we only care about races with the cancel
-    // routine for other IRPs (which can be effectively canceled in either
-    // place).
-    if (irpEntry->IrpSp->MajorFunction != IRP_MJ_CREATE) {
+    // Create IRPs (ForcedCanceled) are special in that this routine is always
+    // their place of effective cancellation. So we only care about races with
+    // the cancel routine for other IRPs (which can be effectively canceled in
+    // either place).
+    if (!irpEntry->RequestContext.ForcedCanceled) {
       if (irp == NULL) {
         // Already canceled previously.
         ASSERT(irpEntry->CancelRoutineFreeMemory == FALSE);
@@ -189,6 +128,10 @@ ReleaseTimeoutPendingIrp(__in PDokanDCB Dcb) {
         irpEntry->CancelRoutineFreeMemory = TRUE;
         continue;
       }
+    } else {
+      // Cleanup ForcedCanceled IRP of the attached CancelRoutine before
+      // Completion.
+      IoSetCancelRoutine(irp, NULL);
     }
 
     // Prevent possible future runs of the cancel routine from doing anything.
@@ -206,11 +149,11 @@ ReleaseTimeoutPendingIrp(__in PDokanDCB Dcb) {
   while (!IsListEmpty(&completeList)) {
     listHead = RemoveHeadList(&completeList);
     irpEntry = CONTAINING_RECORD(listHead, IRP_ENTRY, ListEntry);
-    irp = irpEntry->Irp;
-    PIO_STACK_LOCATION irpSp = irpEntry->IrpSp;
+    irp = irpEntry->RequestContext.Irp;
+    PIO_STACK_LOCATION irpSp = irpEntry->RequestContext.IrpSp;
     if (irpSp->MajorFunction == IRP_MJ_CREATE) {
       BOOLEAN canceled = (irpEntry->TickCount.QuadPart == 0);
-      PFILE_OBJECT fileObject = irpEntry->FileObject;
+      PFILE_OBJECT fileObject = irpEntry->RequestContext.IrpSp->FileObject;
       if (fileObject != NULL) {
         PDokanCCB ccb = fileObject->FsContext2;
         if (ccb != NULL) {
@@ -220,16 +163,14 @@ ReleaseTimeoutPendingIrp(__in PDokanDCB Dcb) {
                             : DOKAN_OPLOCK_DEBUG_TIMED_OUT_CREATE);
         }
       }
-      DokanCancelCreateIrp(
-          Dcb->DeviceObject, irpEntry,
+      DokanCancelCreateIrp(&irpEntry->RequestContext,
           canceled ? STATUS_CANCELLED : STATUS_INSUFFICIENT_RESOURCES);
     } else {
-      DokanCompleteIrpRequest(irp, STATUS_INSUFFICIENT_RESOURCES, 0);
+      irp->IoStatus.Information = 0;
+      DokanCompleteIrpRequest(irp, STATUS_INSUFFICIENT_RESOURCES);
     }
     DokanFreeIrpEntry(irpEntry);
   }
-
-  DDbgPrint("<== ReleaseTimeoutPendingIRP\n");
 
   if (shouldUnmount) {
     // This avoids a race condition where the app terminates before activating
@@ -240,39 +181,34 @@ ReleaseTimeoutPendingIrp(__in PDokanDCB Dcb) {
         &logger,
         L"Unmounting due to operation timeout before keepalive handle was"
         L" activated.");
-    DokanUnmount(Dcb);
+    DokanUnmount(NULL, Dcb);
   }
+
+  DOKAN_LOG("End");
+
   return STATUS_SUCCESS;
 }
 
 NTSTATUS
-DokanResetPendingIrpTimeout(__in PDEVICE_OBJECT DeviceObject,
-                            _Inout_ PIRP Irp) {
+DokanResetPendingIrpTimeout(__in PREQUEST_CONTEXT RequestContext) {
   KIRQL oldIrql;
   PLIST_ENTRY thisEntry, nextEntry, listHead;
   PIRP_ENTRY irpEntry;
-  PDokanVCB vcb;
   PEVENT_INFORMATION eventInfo = NULL;
   ULONG timeout; // in milisecond
 
-  DDbgPrint("==> ResetPendingIrpTimeout\n");
-
-  GET_IRP_BUFFER_OR_RETURN(Irp, eventInfo)
+  GET_IRP_BUFFER_OR_RETURN(RequestContext->Irp, eventInfo);
 
   timeout = eventInfo->Operation.ResetTimeout.Timeout;
   if (DOKAN_IRP_PENDING_TIMEOUT_RESET_MAX < timeout) {
     timeout = DOKAN_IRP_PENDING_TIMEOUT_RESET_MAX;
   }
 
-  vcb = DeviceObject->DeviceExtension;
-  if (GetIdentifierType(vcb) != VCB) {
-    return STATUS_INVALID_PARAMETER;
-  }
   ASSERT(KeGetCurrentIrql() <= DISPATCH_LEVEL);
-  KeAcquireSpinLock(&vcb->Dcb->PendingIrp.ListLock, &oldIrql);
+  KeAcquireSpinLock(&RequestContext->Dcb->PendingIrp.ListLock, &oldIrql);
 
   // search corresponding IRP through pending IRP list
-  listHead = &vcb->Dcb->PendingIrp.ListHead;
+  listHead = &RequestContext->Dcb->PendingIrp.ListHead;
 
   for (thisEntry = listHead->Flink; thisEntry != listHead;
        thisEntry = nextEntry) {
@@ -288,8 +224,7 @@ DokanResetPendingIrpTimeout(__in PDEVICE_OBJECT DeviceObject,
     DokanUpdateTimeout(&irpEntry->TickCount, timeout);
     break;
   }
-  KeReleaseSpinLock(&vcb->Dcb->PendingIrp.ListLock, oldIrql);
-  DDbgPrint("<== ResetPendingIrpTimeout\n");
+  KeReleaseSpinLock(&RequestContext->Dcb->PendingIrp.ListLock, oldIrql);
   return STATUS_SUCCESS;
 }
 
@@ -314,7 +249,7 @@ Routine Description:
   PDokanDCB Dcb = pDcb;
   DOKAN_INIT_LOGGER(logger, Dcb->DeviceObject->DriverObject, 0);
 
-  DDbgPrint("==> DokanTimeoutThread\n");
+  DOKAN_LOG("Start");
 
   KeInitializeTimerEx(&timer, SynchronizationTimer);
 
@@ -333,7 +268,7 @@ Routine Description:
                                       KernelMode, FALSE, NULL, NULL);
 
     if (!NT_SUCCESS(status) || status == STATUS_WAIT_0) {
-      DDbgPrint("  DokanTimeoutThread catched KillEvent\n");
+      DOKAN_LOG("DokanTimeoutThread catched KillEvent");
       // KillEvent or something error is occurred
       waitObj = FALSE;
     } else {
@@ -358,7 +293,7 @@ Routine Description:
 
   KeCancelTimer(&timer);
 
-  DDbgPrint("<== DokanTimeoutThread\n");
+  DOKAN_LOG("Stop");
 
   PsTerminateSystemThread(STATUS_SUCCESS);
 }
@@ -376,12 +311,11 @@ Routine Description:
   NTSTATUS status;
   HANDLE thread;
 
-  DDbgPrint("==> DokanStartCheckThread\n");
-
   status = PsCreateSystemThread(&thread, THREAD_ALL_ACCESS, NULL, NULL, NULL,
                                 (PKSTART_ROUTINE)DokanTimeoutThread, Dcb);
 
   if (!NT_SUCCESS(status)) {
+    DOKAN_LOG("Failed to create Thread");
     return status;
   }
 
@@ -389,8 +323,6 @@ Routine Description:
                             (PVOID *)&Dcb->TimeoutThread, NULL);
 
   ZwClose(thread);
-
-  DDbgPrint("<== DokanStartCheckThread\n");
 
   return STATUS_SUCCESS;
 }
@@ -404,19 +336,16 @@ Routine Description:
 
 --*/
 {
-  DDbgPrint("==> DokanStopCheckThread\n");
-
+  DOKAN_LOG("Stopping Thread");
   if (KeSetEvent(&Dcb->KillEvent, 0, FALSE) > 0 && Dcb->TimeoutThread) {
-    DDbgPrint("Waiting for Timeout thread to terminate.\n");
+    DOKAN_LOG("Waiting for thread to terminate");
     ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
     KeWaitForSingleObject(Dcb->TimeoutThread, Executive, KernelMode, FALSE,
                           NULL);
-    DDbgPrint("Timeout thread successfully terminated.\n");
+    DOKAN_LOG("Thread successfully terminated");
     ObDereferenceObject(Dcb->TimeoutThread);
     Dcb->TimeoutThread = NULL;
   }
-
-  DDbgPrint("<== DokanStopCheckThread\n");
 }
 
 VOID DokanUpdateTimeout(__out PLARGE_INTEGER TickCount, __in ULONG Timeout) {

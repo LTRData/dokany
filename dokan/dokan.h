@@ -107,11 +107,6 @@ extern "C" {
  */
 #define DOKAN_OPTION_ENABLE_NOTIFICATION_API 512
 /**
- * Whether to disable any oplock support on the volume.
- * Regular range locks are enabled regardless.
- */
-#define DOKAN_OPTION_DISABLE_OPLOCKS 1024
-/**
  * The advantage of the FCB GC approach is that it prevents filter drivers (Anti-virus)
  * from exponentially slowing down procedures like zip file extraction due to
  * repeatedly rebuilding state that they attach to the FCB header.
@@ -126,6 +121,12 @@ extern "C" {
 #define DOKAN_OPTION_CASE_SENSITIVE 4096
 /** Allows unmounting of network drive via explorer */
 #define DOKAN_OPTION_ENABLE_UNMOUNT_NETWORK_DRIVE 8192
+/**
+ * Forward the kernel driver global and volume logs to the userland.
+ * 
+ * This option is expected to be slow until IpcBatching is available on v2.x.x
+ */
+#define DOKAN_OPTION_DISPATCH_DRIVER_LOGS 16384
 
 /** @} */
 
@@ -275,6 +276,8 @@ typedef struct _DOKAN_OPERATIONS {
   * Cleanup request before \ref CloseFile is called.
   *
   * When DOKAN_FILE_INFO.DeleteOnClose is \c TRUE, the file in Cleanup must be deleted.
+  * The function cannot fail therefore the filesystem need to ensure ahead
+  * that a the delete can safely happen during Cleanup. 
   * See DeleteFile documentation for explanation.
   *
   * \param FileName File path requested by the Kernel on the FileSystem.
@@ -390,7 +393,8 @@ typedef struct _DOKAN_OPERATIONS {
   * \brief FindFilesWithPattern Dokan API callback
   *
   * Same as \ref DOKAN_OPERATIONS.FindFiles but with a search pattern.\n
-  * The search pattern is a Windows MS-DOS-style expression. See \ref DokanIsNameInExpression .
+  * The search pattern is a Windows MS-DOS-style expression.
+  * It can contain wild cards and extended characters or none of them. See \ref DokanIsNameInExpression.
   *
   * \param PathName Path requested by the Kernel on the FileSystem.
   * \param SearchPattern Search pattern.

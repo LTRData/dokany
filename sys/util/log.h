@@ -29,38 +29,188 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #define DOKAN_DEBUG_LOCK 2
 #define DOKAN_DEBUG_OPLOCKS 4
 
+// Whether DbgPrint is enabled or not.
 extern ULONG g_Debug;
 
-#ifdef _DEBUG
-#define DDbgPrint(...)                                                        \
-  if (g_Debug) {                                                              \
-    KdPrintEx(                                                                \
-        (DPFLTR_IHVDRIVER_ID, DPFLTR_TRACE_LEVEL, "[DokanFS] " __VA_ARGS__)); \
-  }
+typedef struct _DOKAN_LOG_ENTRY {
+  LIST_ENTRY ListEntry;
+  PVOID Vcb;
+  DOKAN_LOG_MESSAGE Log;
+} DOKAN_LOG_ENTRY, *PDOKAN_LOG_ENTRY;
 
-// Print NTSTATUS hex value and the define string.
-VOID DokanPrintNTStatus(NTSTATUS Status);
+typedef struct _DOKAN_LOG_CACHE {
+  LONG NumberOfCachedEntries;
+  ERESOURCE Resource;
+  LIST_ENTRY Log;
+} DOKAN_LOG_CACHE, *PDOKAN_LOG_CACHE;
 
-// Return the NTSTATUS define string name.
-PWCHAR DokanGetNTSTATUSStr(NTSTATUS Status);
+// Global cache for driver global and specific volume logs.
+extern DOKAN_LOG_CACHE g_DokanLogEntryList;
+
+// Push log into the global log entry cache list.
+VOID PushDokanLogEntry(_In_opt_ PVOID RequestContext,
+                       _In_ PCSTR Format, ...);
+
+// Remove all logs attached to a specific volume from the global cache.
+VOID CleanDokanLogEntry(_In_ PVOID Vcb);
+
+// Whether the IRP log should be cached.
+// Used as an early check to unnecessary avoid computing the arguments when it
+// is not needed.
+BOOLEAN IsLogCacheEnabled(_In_opt_ PVOID RequestContext);
+
+// Increment the active Volume having the cache log enabled and active the
+// global caching if not already.
+VOID IncrementVcbLogCacheCount();
+
+// Stringify variable name
+#define STR(x) #x
+
+// Main print function which should not be used directly.
+#define DDbgPrint(Format, ...)                        \
+  KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_TRACE_LEVEL, \
+             "[dokan1]" Format "\n", __VA_ARGS__));
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+#define DokanQuerySystemTime KeQuerySystemTimePrecise
 #else
-// Nullify debug print on release.
-#define DDbgPrint(...)
-#define DokanPrintNTStatus(s)
+#define DokanQuerySystemTime KeQuerySystemTime
 #endif
 
-extern UNICODE_STRING FcbFileNameNull;
-#define DokanPrintFileName(FileObject)                                       \
-  DDbgPrint("  FileName: %wZ FCB.FileName: %wZ\n", &FileObject->FileName,    \
-            FileObject->FsContext2                                           \
-                ? (((PDokanCCB)FileObject->FsContext2)->Fcb                  \
-                       ? &((PDokanCCB)FileObject->FsContext2)->Fcb->FileName \
-                       : &FcbFileNameNull)                                   \
-                : &FcbFileNameNull)
+#define DOKAN_PUSH_LOG(RequestContext, Format, ...)                          \
+  {                                                                          \
+    LARGE_INTEGER SysTime;                                                   \
+    LARGE_INTEGER LocalTime;                                                 \
+    TIME_FIELDS TimeFields;                                                  \
+    DokanQuerySystemTime(&SysTime);                                          \
+    ExSystemTimeToLocalTime(&SysTime, &LocalTime);                           \
+    RtlTimeToTimeFields(&LocalTime, &TimeFields);                            \
+    PushDokanLogEntry(RequestContext, "[%02d:%02d:%02d.%03d]" Format,        \
+                      TimeFields.Hour, TimeFields.Minute, TimeFields.Second, \
+                      TimeFields.Milliseconds, __VA_ARGS__);                 \
+  }
 
+// Log and push to the cache the log message
+#define DOKAN_CACHED_LOG(RequestContext, Format, ...)                  \
+  {                                                                    \
+    KIRQL Kirql = KeGetCurrentIrql();                                  \
+    if (g_Debug) {                                                     \
+      DDbgPrint("[%d]" Format, Kirql, __VA_ARGS__)                     \
+    }                                                                  \
+    if (Kirql == PASSIVE_LEVEL && IsLogCacheEnabled(RequestContext)) { \
+      DOKAN_PUSH_LOG(RequestContext, Format, __VA_ARGS__)              \
+    }                                                                  \
+  }
 
-// Print VCB or DCB Identifier Type
-VOID PrintIdType(__in VOID *Id);
+// Log without caching the message. Must be only used for logging during the log
+// caching workflow.
+#define DOKAN_NO_CACHE_LOG(Format)                                       \
+  {                                                                      \
+    if (g_Debug) {                                                       \
+      DDbgPrint("[%d]" DOKAN_LOG_HEADER ": " Format, KeGetCurrentIrql()) \
+    }                                                                    \
+  }
+
+// Debug print header that should always be used by the print function.
+#define DOKAN_LOG_HEADER "[" __FUNCTION__ "]"
+
+// Internal formating log function.
+#define DOKAN_LOG_INTERNAL(RequestContext, Format, ...)                    \
+  if (!RequestContext || !RequestContext->DoNotLogActivity) {              \
+    DOKAN_CACHED_LOG(RequestContext, DOKAN_LOG_HEADER Format, __VA_ARGS__) \
+  }
+
+// Default log function.
+#define DOKAN_LOG(Format)                                           \
+  do {                                                              \
+    PREQUEST_CONTEXT dRequestContext = NULL;                        \
+    DOKAN_CACHED_LOG(dRequestContext, DOKAN_LOG_HEADER ": " Format) \
+  } while (0)
+
+// Default log function with variable params.
+#define DOKAN_LOG_(Format, ...)                                   \
+  do {                                                            \
+    PREQUEST_CONTEXT dRequestContext = NULL;                      \
+    DOKAN_LOG_INTERNAL(dRequestContext, ": " Format, __VA_ARGS__) \
+  } while (0)
+
+// Logging function that should be used in an Irp context.
+#define DOKAN_LOG_FINE_IRP(RequestContext, Format, ...) \
+  DOKAN_LOG_INTERNAL(RequestContext, "[%p]: " Format,   \
+                     (RequestContext ? RequestContext->Irp : 0), __VA_ARGS__)
+
+// Only allow logging events that are not Wait & Info to avoid unnecessary log
+// flood
+#define DOKAN_DENIED_LOG_EVENT(IrpSp)                                          \
+  (IrpSp->MajorFunction == IRP_MJ_DEVICE_CONTROL &&                            \
+   (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_EVENT_WAIT ||     \
+    IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_EVENT_INFO)) ||   \
+      (IrpSp->MajorFunction == IRP_MJ_FILE_SYSTEM_CONTROL &&                   \
+       IrpSp->MinorFunction == IRP_MN_USER_FS_REQUEST &&                       \
+       (IrpSp->Parameters.FileSystemControl.FsControlCode ==                   \
+            IOCTL_EVENT_WAIT ||                                                \
+        IrpSp->Parameters.FileSystemControl.FsControlCode ==                   \
+            IOCTL_EVENT_INFO))
+
+// Log the Irp FSCTL or IOCTL Control code.
+#define DOKAN_LOG_IOCTL(RequestContext, ControlCode, format, ...)              \
+  do {                                                                         \
+    if (!RequestContext->DoNotLogActivity) {                                   \
+      DOKAN_LOG_INTERNAL(RequestContext, "[%p][%s]: " format,                  \
+                         RequestContext->Irp, DokanGetIoctlStr(ControlCode),   \
+                         __VA_ARGS__)                                          \
+    }                                                                          \
+  } while (0)
+
+// Log the whole Irp informations.
+#define DOKAN_LOG_MJ_IRP(RequestContext, Format, ...)                          \
+  DOKAN_LOG_INTERNAL(                                                          \
+      RequestContext, "[%p][%s][%s][%s]: " Format, RequestContext->Irp,        \
+      DokanGetIdTypeStr(RequestContext->DeviceObject->DeviceExtension),        \
+      DokanGetMajorFunctionStr(RequestContext->IrpSp->MajorFunction),          \
+      DokanGetMinorFunctionStr(RequestContext->IrpSp->MajorFunction,           \
+                               RequestContext->IrpSp->MinorFunction),          \
+      __VA_ARGS__)
+
+// Log the Irp at dispatch time.
+#define DOKAN_LOG_BEGIN_MJ(RequestContext)                                     \
+  DOKAN_LOG_MJ_IRP(RequestContext, "Begin ProcessId=%lu",                      \
+                   RequestContext->ProcessId)
+
+// Log the Irp on exit of the dispatch.
+#define DOKAN_LOG_END_MJ(RequestContext, Status)                               \
+  do {                                                                         \
+    if (RequestContext->DoNotComplete) {                                       \
+      DOKAN_LOG_FINE_IRP(RequestContext, "End - Irp not completed %s",         \
+                         DokanGetNTSTATUSStr(Status));                         \
+    } else if (Status == STATUS_PENDING) {                                     \
+      DOKAN_LOG_FINE_IRP(RequestContext, "End - Irp is marked pending");       \
+    } else {                                                                   \
+      DOKAN_LOG_FINE_IRP(RequestContext, "End - %s Information=%llx",          \
+                         DokanGetNTSTATUSStr(Status),                          \
+                         RequestContext->Irp->IoStatus.Information);           \
+      DokanCompleteIrpRequest(RequestContext->Irp, Status);                    \
+    }                                                                          \
+  } while (0)
+
+// Return the NTSTATUS define string name.
+PCHAR DokanGetNTSTATUSStr(NTSTATUS Status);
+// Return Identifier Type string name.
+PCHAR DokanGetIdTypeStr(__in VOID *Id);
+// Return IRP Major function string name.
+PCHAR DokanGetMajorFunctionStr(UCHAR MajorFunction);
+// Return IRP Minor function string name.
+PCHAR DokanGetMinorFunctionStr(UCHAR MajorFunction, UCHAR MinorFunction);
+// Return File Information class string name.
+PCHAR DokanGetFileInformationClassStr(
+    FILE_INFORMATION_CLASS FileInformationClass);
+// Return Fs Information class string name.
+PCHAR DokanGetFsInformationClassStr(FS_INFORMATION_CLASS FsInformationClass);
+// Return NtCreateFile Information string name.
+PCHAR DokanGetCreateInformationStr(ULONG_PTR Information);
+
+// Return IOCTL string name.
+PCHAR DokanGetIoctlStr(ULONG ControlCode);
 
 typedef struct _DOKAN_LOGGER {
   PDRIVER_OBJECT DriverObject;

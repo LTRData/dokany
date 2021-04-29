@@ -88,9 +88,6 @@
     <ClCompile Include="dispatch.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="pnp.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="util\irp_buffer_helper.c">
       <Filter>Source Files\util</Filter>
     </ClCompile>
@@ -150,6 +147,9 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="util\ntstatus_log.inc">
+      <Filter>Header Files\util</Filter>
+    </None>
+    <None Include="util\ioctl.inc">
       <Filter>Header Files\util</Filter>
     </None>
   </ItemGroup>
