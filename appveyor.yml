@@ -1,7 +1,7 @@
 -
   environment:
     AccessTokenDokanDoc:
-      secure: 1JpCwgUIFUddCeF/nvSRQxb309YpVnHvN/Sd5DLRQCQPTSv/YZVv7CspelmBGSua
+      secure: Omu2AD4ooK5Owx+v4XS3VPuWc0xJyZXGZlgv4ipJqmt0wY2LN7bzev8y3OLHsARU
     SonarQubeToken:
       secure: /gni/fn6VjMyw7qdAvkHuB2h3NoRFdXNqlQSAvqiYsuODhOPDkGGX/yNeOP5F2On
     global:
@@ -14,7 +14,7 @@
       WLK_INST_CACHE: '%DOKAN_CI_CACHE%\wlk_inst'
       DOKAN_MAIN_BUILD_JOB_NAME: "Image: Visual Studio 2019; Configuration: All"
 
-  version: 1.4.1-{build}
+  version: 1.5.0-{build}
   configuration:
   - All
   - SonarQube

@@ -24,6 +24,37 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include "util/irp_buffer_helper.h"
 #include "util/str.h"
 
+NTSTATUS FillNameInformation(__in PREQUEST_CONTEXT RequestContext,
+                             __in PDokanFCB Fcb,
+                             __in PFILE_NAME_INFORMATION NameInfo) {
+  PUNICODE_STRING fileName = &Fcb->FileName;
+  PCHAR dest = (PCHAR)&NameInfo->FileName;
+  NameInfo->FileNameLength = fileName->Length;
+
+  BOOLEAN isNetworkDevice = (RequestContext->Dcb->VolumeDeviceType ==
+                             FILE_DEVICE_NETWORK_FILE_SYSTEM);
+  if (isNetworkDevice) {
+    PUNICODE_STRING devicePath = RequestContext->Dcb->UNCName->Length
+                                     ? RequestContext->Dcb->UNCName
+                                     : RequestContext->Dcb->DiskDeviceName;
+    NameInfo->FileNameLength += devicePath->Length;
+
+    if (!AppendVarSizeOutputString(RequestContext->Irp, dest, devicePath,
+                                   /*UpdateInformationOnFailure=*/FALSE,
+                                   /*FillSpaceWithPartialString=*/TRUE)) {
+      return STATUS_BUFFER_OVERFLOW;
+    }
+    dest += devicePath->Length;
+  }
+
+  if (!AppendVarSizeOutputString(RequestContext->Irp, dest, fileName,
+                                 /*UpdateInformationOnFailure=*/FALSE,
+                                 /*FillSpaceWithPartialString=*/TRUE)) {
+    return STATUS_BUFFER_OVERFLOW;
+  }
+  return STATUS_SUCCESS;
+}
+
 NTSTATUS
 DokanDispatchQueryInformation(__in PREQUEST_CONTEXT RequestContext) {
   NTSTATUS status = STATUS_INVALID_PARAMETER;
@@ -59,43 +90,27 @@ DokanDispatchQueryInformation(__in PREQUEST_CONTEXT RequestContext) {
     OplockDebugRecordMajorFunction(fcb, IRP_MJ_QUERY_INFORMATION);
     DokanFCBLockRO(fcb);
     switch (infoClass) {
+    case FileAllInformation: {
+      PFILE_ALL_INFORMATION allInfo;
+      if (!PrepareOutputHelper(
+              RequestContext->Irp, &allInfo,
+              FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation.FileName),
+                          /*SetInformationOnFailure=*/FALSE)) {
+        status = STATUS_BUFFER_TOO_SMALL;
+        __leave;
+      }
+    } break;
     case FileNormalizedNameInformation:
     case FileNameInformation: {
       PFILE_NAME_INFORMATION nameInfo;
-      if (!PREPARE_OUTPUT(RequestContext->Irp, nameInfo,
+      if (!PrepareOutputHelper(RequestContext->Irp, &nameInfo,
+                               FIELD_OFFSET(FILE_NAME_INFORMATION, FileName),
                           /*SetInformationOnFailure=*/FALSE)) {
         status = STATUS_BUFFER_TOO_SMALL;
         __leave;
       }
 
-      PUNICODE_STRING fileName = &fcb->FileName;
-      PCHAR dest = (PCHAR)&nameInfo->FileName;
-      nameInfo->FileNameLength = fileName->Length;
-
-      BOOLEAN isNetworkDevice = (RequestContext->Dcb->VolumeDeviceType ==
-                                 FILE_DEVICE_NETWORK_FILE_SYSTEM);
-      if (isNetworkDevice) {
-        PUNICODE_STRING devicePath = RequestContext->Dcb->UNCName->Length
-                                         ? RequestContext->Dcb->UNCName
-                                         : RequestContext->Dcb->DiskDeviceName;
-        nameInfo->FileNameLength += devicePath->Length;
-
-        if (!AppendVarSizeOutputString(RequestContext->Irp, dest, devicePath,
-                                       /*UpdateInformationOnFailure=*/FALSE,
-                                       /*FillSpaceWithPartialString=*/TRUE)) {
-          status = STATUS_BUFFER_OVERFLOW;
-          __leave;
-        }
-        dest += devicePath->Length;
-      }
-
-      if (!AppendVarSizeOutputString(RequestContext->Irp, dest, fileName,
-                                     /*UpdateInformationOnFailure=*/FALSE,
-                                     /*FillSpaceWithPartialString=*/TRUE)) {
-        status = STATUS_BUFFER_OVERFLOW;
-        __leave;
-      }
-      status = STATUS_SUCCESS;
+      status = FillNameInformation(RequestContext, fcb, nameInfo);
       __leave;
     } break;
     case FilePositionInformation: {
@@ -123,27 +138,6 @@ DokanDispatchQueryInformation(__in PREQUEST_CONTEXT RequestContext) {
         __leave;
       }
       break;
-    case FileNetworkPhysicalNameInformation: {
-      // This info class is generally not worth passing to the DLL. It will be
-      // filled in with info that is accessible to the driver.
-
-      PFILE_NETWORK_PHYSICAL_NAME_INFORMATION netInfo;
-      if (!PREPARE_OUTPUT(RequestContext->Irp, netInfo,
-                          /*SetInformationOnFailure=*/FALSE)) {
-        status = STATUS_BUFFER_OVERFLOW;
-        __leave;
-      }
-
-      if (!AppendVarSizeOutputString(RequestContext->Irp, &netInfo->FileName,
-                                     &fcb->FileName,
-                                     /*UpdateInformationOnFailure=*/FALSE,
-                                     /*FillSpaceWithPartialString=*/FALSE)) {
-        status = STATUS_BUFFER_OVERFLOW;
-        __leave;
-      }
-      status = STATUS_SUCCESS;
-      __leave;
-    }
     default:
       DOKAN_LOG_FINE_IRP(RequestContext, "Unsupported FileInfoClass %x", infoClass);
     }
@@ -153,12 +147,8 @@ DokanDispatchQueryInformation(__in PREQUEST_CONTEXT RequestContext) {
       __leave;
     }
 
-    // if it is not treadted in swich case
-
-    // calculate the length of EVENT_CONTEXT
-    // sum of it's size and file name length
+    // If the request is not handled by the switch case we send it to userland.
     eventLength = sizeof(EVENT_CONTEXT) + fcb->FileName.Length;
-
     eventContext = AllocateEventContext(RequestContext, eventLength, ccb);
 
     if (eventContext == NULL) {
@@ -253,6 +243,11 @@ VOID DokanCompleteQueryInformation(__in PREQUEST_CONTEXT RequestContext,
 
         allInfo->PositionInformation.CurrentByteOffset =
             RequestContext->IrpSp->FileObject->CurrentByteOffset;
+
+        DokanFCBLockRO(ccb->Fcb);
+        RequestContext->Irp->IoStatus.Status = FillNameInformation(
+            RequestContext, ccb->Fcb, &allInfo->NameInformation);
+        DokanFCBUnlock(ccb->Fcb);
 
       } else if (RequestContext->IrpSp->Parameters.QueryFile
                      .FileInformationClass ==
@@ -370,6 +365,100 @@ VOID FlushAllCachedFcb(__in PREQUEST_CONTEXT RequestContext,
   DOKAN_LOG_FINE_IRP(RequestContext, "Finished");
 }
 
+// Need to be called with RootDirectoryFcb locked RO.
+// If EventContext is NULL, the function will do a Dry run where it will only
+// calculate the renamed FileName size and return it.
+ULONG PopulateRenameEventInformations(__in PREQUEST_CONTEXT RequestContext,
+                                      __in PDokanFCB Fcb,
+                                      __in_opt PEVENT_CONTEXT EventContext,
+                                      __in_opt PDokanFCB RootDirectoryFcb) {
+  ULONG fileNameLength = 0;
+  PFILE_OBJECT targetFileObject =
+      RequestContext->IrpSp->Parameters.SetFile.FileObject;
+
+  // We need to hanle FileRenameInformation separetly because the structure
+  // of FILE_RENAME_INFORMATION has HANDLE type field, which size is
+  // different in 32 bit and 64 bit environment. This cases problems when
+  // driver is 64 bit and user mode library is 32 bit.
+  PFILE_RENAME_INFORMATION renameInfo =
+      (PFILE_RENAME_INFORMATION)RequestContext->Irp->AssociatedIrp.SystemBuffer;
+  PDOKAN_RENAME_INFORMATION renameContext = NULL;
+
+  if (EventContext) {
+    renameContext = (PDOKAN_RENAME_INFORMATION)(
+        (PCHAR)EventContext + EventContext->Operation.SetFile.BufferOffset);
+    renameContext->ReplaceIfExists = renameInfo->ReplaceIfExists;
+  }
+
+  // It is valid to provide a FileName ending with '\'. Clean them up.
+  ULONG renameInfoFileNameLength = renameInfo->FileNameLength;
+  while (renameInfoFileNameLength > sizeof(WCHAR) &&
+         renameInfo->FileName[renameInfoFileNameLength / sizeof(WCHAR) - 1] ==
+             L'\\')
+    renameInfoFileNameLength -= sizeof(WCHAR);
+
+  if (targetFileObject == NULL) {
+    // Simple rename in the same directory: RenameInfo only contains the
+    // filename. We need to build the full path from the Fcb.
+    ULONG fcbFileNamePos = Fcb->FileName.Length / sizeof(WCHAR) - 1;
+    BOOLEAN isAlternateRename = renameInfo->FileNameLength > sizeof(WCHAR) &&
+                                renameInfo->FileName[0] == L':';
+    WCHAR targetWchar = isAlternateRename ? L':' : L'\\';
+    BOOLEAN isIgnoreTargetWchar = !isAlternateRename;
+    fcbFileNamePos = DokanSearchWcharinUnicodeStringWithUlong(
+        &Fcb->FileName, targetWchar, fcbFileNamePos, isIgnoreTargetWchar);
+    if (isAlternateRename && fcbFileNamePos == 0) {
+      // Here FCB doesn't contain the $DATA stream name but it is actually
+      // renamed so we just need to append the stream.
+      fcbFileNamePos = Fcb->FileName.Length / sizeof(WCHAR);
+    }
+    fileNameLength = fcbFileNamePos * sizeof(WCHAR) + renameInfoFileNameLength;
+    if (renameContext) {
+      RtlCopyMemory(renameContext->FileName, Fcb->FileName.Buffer,
+                    fcbFileNamePos * sizeof(WCHAR));
+      RtlCopyMemory(renameContext->FileName + fcbFileNamePos,
+                    renameInfo->FileName, renameInfoFileNameLength);
+    }
+  } else if (renameInfo->RootDirectory == NULL) {
+    // Fully qualified rename: TargetFileObject hold the full path
+    // destination
+    fileNameLength = targetFileObject->FileName.Length;
+    if (renameContext) {
+      RtlCopyMemory(renameContext->FileName, targetFileObject->FileName.Buffer,
+                    targetFileObject->FileName.Length);
+    }
+  } else {
+    // Relative rename: RenameInfo only contains the filename. We need to
+    // build the full path with the RootDirectory. Using
+    // TargetFileObject->RelatedFileObject is possible but not enough in some
+    // cases.
+    // Note: FASTFAT does not support this type of rename but NTFS does.
+    ASSERT(RootDirectoryFcb != NULL);
+    PUNICODE_STRING rootFileName = &RootDirectoryFcb->FileName;
+    BOOLEAN addSeparator =
+        rootFileName->Buffer[rootFileName->Length / sizeof(WCHAR) - 1] != L'\\';
+    fileNameLength = rootFileName->Length + (addSeparator ? sizeof(WCHAR) : 0);
+    if (renameContext) {
+      RtlCopyMemory(renameContext->FileName, rootFileName->Buffer,
+                    rootFileName->Length);
+      if (addSeparator) {
+        renameContext->FileName[rootFileName->Length / sizeof(WCHAR)] = L'\\';
+      }
+      RtlCopyMemory((PCHAR)renameContext->FileName + fileNameLength,
+                    renameInfo->FileName, renameInfoFileNameLength);
+    }
+    fileNameLength += renameInfoFileNameLength;
+  }
+
+  if (renameContext) {
+    renameContext->FileNameLength = fileNameLength;
+    DOKAN_LOG_FINE_IRP(
+        RequestContext, "Rename: \"%wZ\" => \"%ls\", Fcb=%p FileCount = %u",
+        Fcb->FileName, renameContext->FileName, Fcb, (ULONG)Fcb->FileCount);
+  }
+  return fileNameLength;
+}
+
 NTSTATUS
 DokanDispatchSetInformation(__in PREQUEST_CONTEXT RequestContext) {
 
@@ -379,7 +468,11 @@ DokanDispatchSetInformation(__in PREQUEST_CONTEXT RequestContext) {
   PDokanCCB ccb;
   PDokanFCB fcb = NULL;
   ULONG eventLength;
-  PFILE_OBJECT targetFileObject;
+  BOOLEAN isRename = FALSE;
+  PFILE_OBJECT targetFileObject = NULL;
+  PDokanFCB rootDirectoryFcb = NULL;
+  BOOLEAN rootDirectoryFcbLocked = FALSE;
+  PFILE_OBJECT rootDirObject = NULL;
   PEVENT_CONTEXT eventContext;
   BOOLEAN isPagingIo = FALSE;
   BOOLEAN fcbLocked = FALSE;
@@ -472,15 +565,19 @@ DokanDispatchSetInformation(__in PREQUEST_CONTEXT RequestContext) {
     } break;
     case FileRenameInformation:
     case FileRenameInformationEx:
+        isRename = TRUE;
       /* Flush any opened files before doing a rename
        * of the parent directory or the specific file
        */
       targetFileObject = RequestContext->IrpSp->Parameters.SetFile.FileObject;
-      if (targetFileObject) {
-        DOKAN_LOG_FINE_IRP(RequestContext, "TargetFileObject specified so perform flush");
+      if (targetFileObject != NULL) {
+          DOKAN_LOG_FINE_IRP(RequestContext,
+                             "FileObject Specified so perform flush %p \"%wZ\"",
+                             targetFileObject, &(targetFileObject->FileName));
         PDokanCCB targetCcb = (PDokanCCB)targetFileObject->FsContext2;
         ASSERT(targetCcb != NULL);
-        FlushAllCachedFcb(RequestContext, targetCcb->Fcb, targetFileObject);
+        PDokanFCB targetFcb = (PDokanFCB)targetCcb->Fcb;
+        FlushAllCachedFcb(RequestContext, targetFcb, targetFileObject);
       }
       FlushAllCachedFcb(RequestContext, fcb, fileObject);
       break;
@@ -490,15 +587,11 @@ DokanDispatchSetInformation(__in PREQUEST_CONTEXT RequestContext) {
           RequestContext->IrpSp->Parameters.SetFile.FileInformationClass);
     }
 
-    //
-    // when this IRP is not handled in swich case
-    //
-
-    // calcurate the size of EVENT_CONTEXT
-    // it is sum of file name length and size of FileInformation
     DokanFCBLockRW(fcb);
     fcbLocked = TRUE;
 
+    // When this IRP is not handled in switch case, calculate the size of
+    // EVENT_CONTEXT: FileName length + FileInformation buffer size
     eventLength = sizeof(EVENT_CONTEXT) + fcb->FileName.Length;
     if (RequestContext->IrpSp->Parameters.SetFile.Length >
         MAXULONG - eventLength) {
@@ -508,16 +601,50 @@ DokanDispatchSetInformation(__in PREQUEST_CONTEXT RequestContext) {
     }
     eventLength += RequestContext->IrpSp->Parameters.SetFile.Length;
 
-    targetFileObject = RequestContext->IrpSp->Parameters.SetFile.FileObject;
-    if (targetFileObject) {
-      DOKAN_LOG_FINE_IRP(RequestContext, "FileObject Specified %p \"%wZ\"", targetFileObject,
-                    &(targetFileObject->FileName));
-      if (targetFileObject->FileName.Length > MAXULONG - eventLength) {
-        DOKAN_LOG_FINE_IRP(RequestContext, "Invalid FileObject FileName Length received");
+    if (isRename) {
+      PFILE_RENAME_INFORMATION renameInfo =
+          (PFILE_RENAME_INFORMATION)
+              RequestContext->Irp->AssociatedIrp.SystemBuffer;
+      if (renameInfo->RootDirectory != NULL) {
+        // Relative rename
+        status = ObReferenceObjectByHandle(
+            renameInfo->RootDirectory, STANDARD_RIGHTS_READ, *IoFileObjectType,
+            KernelMode, (PVOID *)&rootDirObject, NULL);
+        if (!NT_SUCCESS(status)) {
+          DOKAN_LOG_FINE_IRP(RequestContext,
+                             "Failed to get RootDirectory object - %s",
+                             DokanGetNTSTATUSStr(status));
+          __leave;
+        }
+        // TODO(adrienj): Create a helper to get FCB directly from FsContext2
+        PDokanCCB rootDirectoryCcb = (PDokanCCB)rootDirObject->FsContext2;
+        ASSERT(rootDirectoryCcb != NULL);
+        rootDirectoryFcb = (PDokanFCB)rootDirectoryCcb->Fcb;
+        ASSERT(rootDirectoryFcb != NULL);
+        DokanFCBLockRO(rootDirectoryFcb);
+        rootDirectoryFcbLocked = TRUE;
+        DOKAN_LOG_FINE_IRP(RequestContext, "RootDirectory FCB %p \"%wZ\"",
+                           rootDirectoryFcb, rootDirectoryFcb->FileName);
+        // NTFS does not seem to support relative stream rename. In our case we
+        // do our best but having a FileName without the base is clearly
+        // invalid.
+        if (renameInfo->FileNameLength >= sizeof(WCHAR) &&
+            renameInfo->FileName[0] == L':') {
+          status = STATUS_INVALID_PARAMETER;
+          __leave;
+        }
+      }
+      // This is a dry run just to get the needed size to AllocateEventContext
+      ULONG renameFileNameLength = PopulateRenameEventInformations(
+          RequestContext, fcb, NULL, rootDirectoryFcb);
+      if (renameFileNameLength > MAXULONG - eventLength) {
+        DOKAN_LOG_FINE_IRP(RequestContext,
+                           "Invalid destination FileName length %lu",
+                           renameFileNameLength);
         status = STATUS_INSUFFICIENT_RESOURCES;
         __leave;
       }
-      eventLength += targetFileObject->FileName.Length;
+      eventLength += renameFileNameLength;
     }
 
     eventContext = AllocateEventContext(RequestContext, eventLength, ccb);
@@ -540,80 +667,15 @@ DokanDispatchSetInformation(__in PREQUEST_CONTEXT RequestContext) {
         FIELD_OFFSET(EVENT_CONTEXT, Operation.SetFile.FileName[0]) +
         fcb->FileName.Length + sizeof(WCHAR); // the last null char
 
-    BOOLEAN isRenameOrLink =
-        RequestContext->IrpSp->Parameters.SetFile.FileInformationClass ==
-            FileRenameInformation ||
-        RequestContext->IrpSp->Parameters.SetFile.FileInformationClass ==
-            FileLinkInformation;
-
-    if (!isRenameOrLink) {
+    if (isRename) {
+      PopulateRenameEventInformations(RequestContext, fcb, eventContext,
+                                      rootDirectoryFcb);
+    } else {
       // copy FileInformation
       RtlCopyMemory(
           (PCHAR)eventContext + eventContext->Operation.SetFile.BufferOffset,
           RequestContext->Irp->AssociatedIrp.SystemBuffer,
           RequestContext->IrpSp->Parameters.SetFile.Length);
-    }
-
-    if (isRenameOrLink) {
-      // We need to hanle FileRenameInformation separetly because the structure
-      // of FILE_RENAME_INFORMATION
-      // has HANDLE type field, which size is different in 32 bit and 64 bit
-      // environment.
-      // This cases problems when driver is 64 bit and user mode library is 32
-      // bit.
-      PFILE_RENAME_INFORMATION renameInfo =
-          (PFILE_RENAME_INFORMATION)
-              RequestContext->Irp->AssociatedIrp.SystemBuffer;
-      PDOKAN_RENAME_INFORMATION renameContext = (PDOKAN_RENAME_INFORMATION)(
-          (PCHAR)eventContext + eventContext->Operation.SetFile.BufferOffset);
-
-      // This code assumes FILE_RENAME_INFORMATION and FILE_LINK_INFORMATION
-      // have
-      // the same typse and fields.
-      ASSERT(sizeof(FILE_RENAME_INFORMATION) == sizeof(FILE_LINK_INFORMATION));
-
-      renameContext->ReplaceIfExists = renameInfo->ReplaceIfExists;
-      renameContext->FileNameLength = renameInfo->FileNameLength;
-      RtlCopyMemory(renameContext->FileName, renameInfo->FileName,
-                    renameInfo->FileNameLength);
-
-      if (targetFileObject != NULL) {
-        // if Parameters.SetFile.FileObject is specified, replace
-        // FILE_RENAME_INFO's file name by
-        // FileObject's file name. The buffer size is already adjusted.
-
-        DOKAN_LOG_FINE_IRP(RequestContext, "RenameContext->FileNameLength %d",
-                      renameContext->FileNameLength);
-        DOKAN_LOG_FINE_IRP(RequestContext, "RenameContext->FileName %ws",
-                      renameContext->FileName);
-        RtlZeroMemory(renameContext->FileName, renameContext->FileNameLength);
-
-        PFILE_OBJECT parentFileObject = targetFileObject->RelatedFileObject;
-        if (parentFileObject != NULL) {
-          RtlCopyMemory(renameContext->FileName,
-                        parentFileObject->FileName.Buffer,
-                        parentFileObject->FileName.Length);
-
-          RtlStringCchCatW(renameContext->FileName, NTSTRSAFE_MAX_CCH, L"\\");
-          RtlStringCchCatW(renameContext->FileName, NTSTRSAFE_MAX_CCH,
-                           targetFileObject->FileName.Buffer);
-          renameContext->FileNameLength = targetFileObject->FileName.Length +
-                                          parentFileObject->FileName.Length +
-                                          sizeof(WCHAR);
-        } else {
-          RtlCopyMemory(renameContext->FileName,
-                        targetFileObject->FileName.Buffer,
-                        targetFileObject->FileName.Length);
-          renameContext->FileNameLength = targetFileObject->FileName.Length;
-        }
-      }
-
-      if (RequestContext->IrpSp->Parameters.SetFile.FileInformationClass ==
-          FileRenameInformation) {
-        DOKAN_LOG_FINE_IRP(RequestContext, "Rename: \"%wZ\" => \"%ls\", Fcb=%p FileCount = %u",
-                      fcb->FileName, renameContext->FileName, fcb,
-                      (ULONG)fcb->FileCount);
-      }
     }
 
     // copy the file name
@@ -642,6 +704,10 @@ DokanDispatchSetInformation(__in PREQUEST_CONTEXT RequestContext) {
     status = DokanRegisterPendingIrp(RequestContext, eventContext);
 
   } __finally {
+    if (rootDirectoryFcbLocked) {
+      DokanFCBUnlock(rootDirectoryFcb);
+      ObDereferenceObject(rootDirObject);
+    }
     if (fcbLocked)
       DokanFCBUnlock(fcb);
   }
@@ -831,12 +897,6 @@ VOID DokanCompleteSetInformation(__in PREQUEST_CONTEXT RequestContext,
         case FileEndOfFileInformation:
           DokanNotifyReportChange(RequestContext, fcb, FILE_NOTIFY_CHANGE_SIZE,
                                   FILE_ACTION_MODIFIED);
-          break;
-        case FileLinkInformation:
-          // TODO: should check whether this is a directory
-          // TODO: should notify new link name
-          // DokanNotifyReportChange(vcb, ccb, FILE_NOTIFY_CHANGE_FILE_NAME,
-          // FILE_ACTION_ADDED);
           break;
         case FileRenameInformationEx:
         case FileRenameInformation: {

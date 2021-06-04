@@ -3,11 +3,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](http://keepachangelog.com/) and this project adheres to [Semantic Versioning](http://semver.org/).
 
-## [Unreleased]
+## [1.5.0.3000] - 2021-05-31
+### Changed
+- Installer - Add Win7 KB4474419 requirements (replace previous KB3033929).
+
+### Fixed
+- Kernel - Fix break exit type no longer having the wanted effect.
+
+## [1.5.0.2000] - 2021-05-26
+### Fixed
+- Kernel - Incorrect eventLength usage for read/flush/security event after merge 981575c.
+
+## [1.5.0.1000] - 2021-05-25
 ### Added
 - Kernel - Add AllowIpcBatching option. [Looking for help to implement in the library.](https://github.com/dokan-dev/dokany/issues/981)
 - Kernel - Allow kernel driver logs to be dispatched to userland.
 - Kernel/Library - Add an option to use FSCTL Event type instead of IOCTL with dwDesiredAccess nullified.
+- Kernel - Support Simple / Fully Qualified / Relative rename.
 
 ### Changed
 - Kernel - Remove legacy -1 status value conversion.
@@ -18,12 +30,17 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/) and this p
 - Kernel - Centralize Irp Completion & Logging (Begin / End) and wrap request information into a `RequestContext`.
 - Mirror - Use `GetDiskFreeSpaceEx` to support larger volume space.
 - Kernel - Remove legacy mount service IOCTL code.
+- FUSE - Return a valid fuse instance during `fuse_get_context`.
+- Mirror - Enable long path support by default.
+- Kernel - Fill `FILE_NAME_INFORMATION` in Kernel side during `FILE_ALL_INFORMATION`.
+- Kernel - Remove unsupported `FileNetworkPhysicalNameInformation` QueryInformation.
 
 ### Fixed
 - Library - Fix rename with double `\` for drive network shared.
 - FUSE - Reuse `fuse_unmount` during `fuse_exit` to trigger `fuse_loop` to exit after Driver unmount the drive.
 - Kernel - Fix a very rare race condition that make library fail to detect unmount.
 - Kernel - Release CancelRoutine during Create timeout.
+- Kernel - Fix invalid buffer size count when `PREPARE_OUTPUT` is used with types ending with a dynamic size field that are later filled with `AppendVarSizeOutputString`.
 
 ## [1.4.1.1000] - 2021-01-14
 ### Added
@@ -516,7 +533,9 @@ Latest Dokan version from Hiroki Asakawa.
  [http://dokan-dev.net/en]( http://web.archive.org/web/20150419082954/http://dokan-dev.net/en/)
 
 
-[Unreleased]: https://github.com/dokan-dev/dokany/compare/v1.4.1.1000...master
+[1.5.0.3000]: https://github.com/dokan-dev/dokany/compare/v1.5.0.2000...v1.5.0.3000
+[1.5.0.2000]: https://github.com/dokan-dev/dokany/compare/v1.5.0.1000...v1.5.0.2000
+[1.5.0.1000]: https://github.com/dokan-dev/dokany/compare/v1.4.1.1000...v1.5.0.1000
 [1.4.1.1000]: https://github.com/dokan-dev/dokany/compare/v1.4.0.1000...v1.4.1.1000
 [1.4.0.1000]: https://github.com/dokan-dev/dokany/compare/v1.3.1.1000...v1.4.0.1000
 [1.3.1.1000]: https://github.com/dokan-dev/dokany/compare/v1.3.0.1000...v1.3.1.1000
