@@ -1,0 +1,11 @@
+TARGETNAME=dokan1
+TARGETTYPE=DRIVER
+
+INCLUDES=..\compat
+
+TARGETLIBS= \
+	$(DDK_LIB_PATH)\wdmsec.lib
+
+C_DEFINES = $(C_DEFINES) /DUNICODE /D_UNICODE /D_In_=IN /D_Inout_ /DMAX_PATH=260
+
+SOURCES=access.c cleanup.c close.c create.c device.c directory.c dispatch.c dokan.c dokan_utility.c event.c except.c fileinfo.c flush.c fscontrol.c init.c lock.c notification.c pnp.c read.c security.c timeout.c volume.c write.c dokan.rc
