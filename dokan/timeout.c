@@ -26,89 +26,32 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 BOOL DOKANAPI DokanResetTimeout(ULONG Timeout, PDOKAN_FILE_INFO FileInfo) {
   BOOL status;
   ULONG returnedLength;
-  PDOKAN_INSTANCE instance;
-  PDOKAN_OPEN_INFO openInfo;
-  PEVENT_CONTEXT eventContext;
+  PDOKAN_IO_EVENT ioEvent;
   PEVENT_INFORMATION eventInfo;
   ULONG eventInfoSize = sizeof(EVENT_INFORMATION);
   WCHAR rawDeviceName[MAX_PATH];
 
-  openInfo = (PDOKAN_OPEN_INFO)(UINT_PTR)FileInfo->DokanContext;
-
-  if (openInfo == NULL) {
-    return FALSE;
-  }
-
-  eventContext = openInfo->EventContext;
-  if (eventContext == NULL) {
-    return FALSE;
-  }
-
-  instance = openInfo->DokanInstance;
-  if (instance == NULL) {
+  ioEvent = (PDOKAN_IO_EVENT)(UINT_PTR)FileInfo->DokanContext;
+  if (ioEvent->EventContext == NULL || ioEvent->DokanInstance == NULL) {
+    SetLastError(ERROR_INVALID_PARAMETER);
     return FALSE;
   }
 
   eventInfo = (PEVENT_INFORMATION)malloc(eventInfoSize);
   if (eventInfo == NULL) {
+    SetLastError(ERROR_OUTOFMEMORY);
     return FALSE;
   }
   RtlZeroMemory(eventInfo, eventInfoSize);
 
-  eventInfo->SerialNumber = eventContext->SerialNumber;
+  eventInfo->SerialNumber = ioEvent->EventContext->SerialNumber;
   eventInfo->Operation.ResetTimeout.Timeout = Timeout;
-  GetRawDeviceName(instance->DeviceName, rawDeviceName, MAX_PATH);
-  status = SendToDevice(rawDeviceName, IOCTL_RESET_TIMEOUT, eventInfo,
+  GetRawDeviceName(ioEvent->DokanInstance->DeviceName, rawDeviceName, MAX_PATH);
+  status = SendToDevice(rawDeviceName, FSCTL_RESET_TIMEOUT, eventInfo,
                         eventInfoSize, NULL, 0, &returnedLength);
+  if (!status) {
+    DbgPrintW(L"FSCTL_RESET_TIMEOUT failed\n");
+  }
   free(eventInfo);
   return status;
-}
-
-/* Legacy KeepAlive - Remove for 2.0.0 */
-UINT WINAPI DokanKeepAlive(PVOID instance) {
-  PDOKAN_INSTANCE DokanInstance = (PDOKAN_INSTANCE)instance;
-  HANDLE device;
-  ULONG ReturnedLength;
-  WCHAR rawDeviceName[MAX_PATH];
-
-  GetRawDeviceName(DokanInstance->DeviceName, rawDeviceName, MAX_PATH);
-
-  for (;;) {
-
-    device = CreateFile(rawDeviceName,
-                        GENERIC_READ | GENERIC_WRITE,       // dwDesiredAccess
-                        FILE_SHARE_READ | FILE_SHARE_WRITE, // dwShareMode
-                        NULL,          // lpSecurityAttributes
-                        OPEN_EXISTING, // dwCreationDistribution
-                        0,             // dwFlagsAndAttributes
-                        NULL           // hTemplateFile
-    );
-
-    if (device == INVALID_HANDLE_VALUE) {
-      DbgPrint("Dokan Error: DokanKeepAlive CreateFile failed %ws: %d\n",
-               rawDeviceName, GetLastError());
-      break;
-    }
-
-    BOOL status = DeviceIoControl(device,          // Handle to device
-                                  IOCTL_KEEPALIVE, // IO Control code
-                                  NULL,            // Input Buffer to driver.
-                                  0,    // Length of input buffer in bytes.
-                                  NULL, // Output Buffer from driver.
-                                  0,    // Length of output buffer in bytes.
-                                  &ReturnedLength, // Bytes placed in buffer.
-                                  NULL             // synchronous call
-    );
-
-    CloseHandle(device);
-
-    if (!status) {
-      break;
-    }
-
-    Sleep(DOKAN_KEEPALIVE_TIME);
-  }
-
-  _endthreadex(0);
-  return STATUS_SUCCESS;
 }

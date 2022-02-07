@@ -41,15 +41,17 @@ namespace memfs {
 class memfs {
  public:
   memfs() = default;
-  // Start the memory filesystem
-  void run();
-  // Unmount the device when destructor is called
-  virtual ~memfs();
+  // Start the memory filesystem and block until unmount.
+  void start();
+  void wait();
+  void stop();
+
+  DOKAN_HANDLE instance = nullptr;
 
   // FileSystem mount options
   WCHAR mount_point[MAX_PATH] = L"M:\\";
   WCHAR unc_name[MAX_PATH] = L"";
-  USHORT thread_number = 5;
+  bool single_thread = false;
   bool network_drive = false;
   bool removable_drive = false;
   bool current_session = false;
@@ -58,7 +60,7 @@ class memfs {
   bool dispatch_driver_logs = false;
   ULONG timeout = 0;
 
-  // FileSystem context runtime
+  // Memory FileSystem runtime context.
   std::unique_ptr<fs_filenodes> fs_filenodes;
 };
 }  // namespace memfs

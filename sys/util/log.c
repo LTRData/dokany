@@ -18,6 +18,9 @@ You should have received a copy of the GNU Lesser General Public License along
 with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
+// Tmp fix for unresolve external symbol vswprintf build error on last WDK.
+#define _NO_CRT_STDIO_INLINE
+
 #include "../dokan.h"
 #include "log.h"
 
@@ -36,7 +39,7 @@ BOOLEAN g_DokanDriverLogCacheEnabled = FALSE;
 LONG g_DokanVcbDriverLogCacheCount = 0;
 DOKAN_LOG_CACHE g_DokanLogEntryList;
 
-VOID PopDokanLogEntry(_In_ PDokanVCB Vcb);
+VOID PopDokanLogEntry(_In_opt_ PVOID RequestContext, _In_ PDokanVCB Vcb);
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(PAGE, PushDokanLogEntry)
 #pragma alloc_text(PAGE, PopDokanLogEntry)
@@ -331,17 +334,6 @@ PCHAR DokanGetMinorFunctionStr(UCHAR MajorFunction, UCHAR MinorFunction) {
     }
     case IRP_MJ_DEVICE_CONTROL: {
       switch (MinorFunction) {
-        CASE_STR(IOCTL_GET_VERSION)
-        CASE_STR(IOCTL_SET_DEBUG_MODE)
-        CASE_STR(IOCTL_EVENT_WAIT)
-        CASE_STR(IOCTL_EVENT_INFO)
-        CASE_STR(IOCTL_EVENT_RELEASE)
-        CASE_STR(IOCTL_EVENT_START)
-        CASE_STR(IOCTL_EVENT_WRITE)
-        CASE_STR(IOCTL_RESET_TIMEOUT)
-        CASE_STR(IOCTL_GET_ACCESS_TOKEN)
-        CASE_STR(IOCTL_EVENT_MOUNTPOINT_LIST)
-        CASE_STR(IOCTL_GET_VOLUME_METRICS)
         default:
           return "MN_UNKNOWN";
       }
@@ -484,32 +476,19 @@ PCHAR DokanGetCreateInformationStr(ULONG_PTR Information) {
 
 PCHAR DokanGetIoctlStr(ULONG ControlCode) {
   switch (ControlCode) {
-    CASE_STR(IOCTL_GET_VERSION)
     CASE_STR(FSCTL_GET_VERSION)
-    CASE_STR(IOCTL_SET_DEBUG_MODE)
     CASE_STR(FSCTL_SET_DEBUG_MODE)
-    CASE_STR(IOCTL_EVENT_WAIT)
-    CASE_STR(FSCTL_EVENT_WAIT)
-    CASE_STR(IOCTL_EVENT_INFO)
-    CASE_STR(FSCTL_EVENT_INFO)
-    CASE_STR(IOCTL_EVENT_RELEASE)
     CASE_STR(FSCTL_EVENT_RELEASE)
-    CASE_STR(IOCTL_EVENT_START)
     CASE_STR(FSCTL_EVENT_START)
-    CASE_STR(IOCTL_EVENT_WRITE)
     CASE_STR(FSCTL_EVENT_WRITE)
-    CASE_STR(IOCTL_RESET_TIMEOUT)
     CASE_STR(FSCTL_RESET_TIMEOUT)
-    CASE_STR(IOCTL_GET_ACCESS_TOKEN)
     CASE_STR(FSCTL_GET_ACCESS_TOKEN)
-    CASE_STR(IOCTL_EVENT_MOUNTPOINT_LIST)
     CASE_STR(FSCTL_EVENT_MOUNTPOINT_LIST)
     CASE_STR(FSCTL_ACTIVATE_KEEPALIVE)
     CASE_STR(FSCTL_NOTIFY_PATH)
-    CASE_STR(IOCTL_GET_VOLUME_METRICS)
     CASE_STR(FSCTL_GET_VOLUME_METRICS)
-    CASE_STR(IOCTL_MOUNTPOINT_CLEANUP)
     CASE_STR(FSCTL_MOUNTPOINT_CLEANUP)
+    CASE_STR(FSCTL_EVENT_PROCESS_N_PULL)
 #include "ioctl.inc"
   }
   return "Unknown";
@@ -568,7 +547,7 @@ VOID PushDokanLogEntry(_In_opt_ PVOID RequestContext, _In_ PCSTR Format, ...) {
     InsertTailList(&g_DokanLogEntryList.Log, &logEntry->ListEntry);
 
     if (requestContext && requestContext->Vcb && requestContext->Vcb->Dcb) {
-      PopDokanLogEntry(requestContext->Vcb);
+      PopDokanLogEntry(requestContext, requestContext->Vcb);
     }
   } __finally {
     DokanResourceUnlock(&(g_DokanLogEntryList.Resource));
@@ -578,7 +557,7 @@ VOID PushDokanLogEntry(_In_opt_ PVOID RequestContext, _In_ PCSTR Format, ...) {
 // Dispatch global and specific Vcb log messages from global
 // log entry cache list to userland.
 // Need to be called with g_DokanLogEntryList Lock RW.
-VOID PopDokanLogEntry(_In_ PDokanVCB Vcb) {
+VOID PopDokanLogEntry(_In_opt_ PVOID RequestContext, _In_ PDokanVCB Vcb) {
   PLIST_ENTRY listEntry;
   PLIST_ENTRY nextListEntry;
   PDOKAN_LOG_ENTRY logEntry;
@@ -609,7 +588,10 @@ VOID PopDokanLogEntry(_In_ PDokanVCB Vcb) {
     dokanLogString = (PDOKAN_LOG_MESSAGE)((PCHAR)(PCHAR)eventContext +
                                           sizeof(EVENT_CONTEXT));
     RtlCopyMemory(dokanLogString, &logEntry->Log, messageFullSize);
-    DokanEventNotification(&Vcb->Dcb->NotifyEvent, eventContext);
+    if (RequestContext) {
+      DokanEventNotification(RequestContext, &Vcb->Dcb->NotifyEvent,
+                             eventContext);
+    }
 
     nextListEntry = listEntry->Flink;
     RemoveEntryList(listEntry);

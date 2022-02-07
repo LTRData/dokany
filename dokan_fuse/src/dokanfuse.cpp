@@ -426,7 +426,8 @@ GetVolumeInformation(LPWSTR VolumeNameBuffer, DWORD VolumeNameSize,
       FileSystemNameSize, DokanFileInfo, FileSystemFlags));
 }
 
-static NTSTATUS DOKAN_CALLBACK FuseMounted(PDOKAN_FILE_INFO DokanFileInfo) {
+static NTSTATUS DOKAN_CALLBACK FuseMounted(LPCWSTR /*MountPoint*/,
+                                           PDOKAN_FILE_INFO DokanFileInfo) {
   impl_fuse_context *impl = the_impl;
   if (impl->debug())
     FPRINTF(stderr, "Mounted\n");
@@ -519,14 +520,14 @@ int do_fuse_loop(struct fuse *fs, bool mt) {
   }
 
   wchar_t mount[MAX_PATH + 1];
-  if (utf8_to_wchar_buf(fs->ch->mountpoint.c_str(), mount, MAX_PATH) == static_cast<size_t>(-1)) {
+  if (utf8_to_wchar_buf(fs->ch->mountpoint.c_str(), mount, MAX_PATH) == -1) {
     free(dokanOptions);
     return -1;
   }
 
   dokanOptions->Version = DOKAN_VERSION;
   dokanOptions->MountPoint = mount;
-  dokanOptions->ThreadCount = mt ? FUSE_THREAD_COUNT : 1;
+  dokanOptions->SingleThread = !mt;
   dokanOptions->Timeout = fs->conf.timeoutInSec * 1000;
   dokanOptions->AllocationUnitSize = fs->conf.allocationUnitSize;
   dokanOptions->SectorSize = fs->conf.sectorSize;
@@ -565,6 +566,10 @@ bool fuse_chan::init() {
   if (!ResolvedDokanVersion || ResolvedDokanVersion() < DOKAN_VERSION)
     return false;
 
+  ResolvedDokanInit =
+      reinterpret_cast<DokanInitType>(GetProcAddress(dokanDll, "DokanInit"));
+  ResolvedDokanShutdown = reinterpret_cast<DokanShutdownType>(
+      GetProcAddress(dokanDll, "DokanShutdown"));
   ResolvedDokanMain = reinterpret_cast<DokanMainType>(GetProcAddress(dokanDll, "DokanMain"));
   ResolvedDokanUnmount =
       reinterpret_cast<DokanUnmountType>(GetProcAddress(dokanDll, "DokanUnmount"));
@@ -574,12 +579,15 @@ bool fuse_chan::init() {
   if (!ResolvedDokanMain || !ResolvedDokanUnmount ||
       !ResolvedDokanRemoveMountPoint)
     return false;
+  ResolvedDokanInit();
   return true;
 }
 
 fuse_chan::~fuse_chan() {
-  if (dokanDll)
+  if (dokanDll) {
+    ResolvedDokanShutdown();
     FreeLibrary(dokanDll);
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////
@@ -686,7 +694,7 @@ void fuse_unmount(const char *mountpoint, struct fuse_chan *ch) {
   // Unmount attached FUSE filesystem
   if (ch->ResolvedDokanRemoveMountPoint) {
     wchar_t wmountpoint[MAX_PATH + 1];
-    if (utf8_to_wchar_buf(mountpoint, wmountpoint, MAX_PATH) == static_cast<size_t>(-1)) {
+    if (utf8_to_wchar_buf(mountpoint, wmountpoint, MAX_PATH) == -1) {
       return;
     }
     wchar_t &last = wmountpoint[wcslen(wmountpoint) - 1];

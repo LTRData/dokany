@@ -40,30 +40,27 @@ fs_filenodes::fs_filenodes() {
   LPTSTR user_sid_str = NULL;
   LPTSTR group_sid_str = NULL;
 
+  // Build default root filenode SecurityDescriptor
   if (OpenProcessToken(GetCurrentProcess(), TOKEN_READ, &token_handle) ==
       FALSE) {
     throw std::runtime_error("Failed init root resources");
   }
-
   DWORD return_length;
   if (!GetTokenInformation(token_handle, TokenUser, buffer, sizeof(buffer),
                            &return_length)) {
     CloseHandle(token_handle);
     throw std::runtime_error("Failed init root resources");
   }
-
   user_token = (PTOKEN_USER)buffer;
   if (!ConvertSidToStringSid(user_token->User.Sid, &user_sid_str)) {
     CloseHandle(token_handle);
     throw std::runtime_error("Failed init root resources");
   }
-
   if (!GetTokenInformation(token_handle, TokenGroups, buffer, sizeof(buffer),
                            &return_length)) {
     CloseHandle(token_handle);
     throw std::runtime_error("Failed init root resources");
   }
-
   groups_token = (PTOKEN_GROUPS)buffer;
   if (groups_token->GroupCount > 0) {
     if (!ConvertSidToStringSid(groups_token->Groups[0].Sid, &group_sid_str)) {
@@ -71,21 +68,18 @@ fs_filenodes::fs_filenodes() {
       throw std::runtime_error("Failed init root resources");
     }
     swprintf_s(buffer, 1024, L"O:%lsG:%ls", user_sid_str, group_sid_str);
-  } else
+  } else {
     swprintf_s(buffer, 1024, L"O:%ls", user_sid_str);
-
+  }
   LocalFree(user_sid_str);
   LocalFree(group_sid_str);
   CloseHandle(token_handle);
-
   swprintf_s(final_buffer, 2048, L"%lsD:PAI(A;OICI;FA;;;AU)", buffer);
-
   PSECURITY_DESCRIPTOR security_descriptor = NULL;
   ULONG size = 0;
   if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
           final_buffer, SDDL_REVISION_1, &security_descriptor, &size))
     throw std::runtime_error("Failed init root resources");
-
   auto fileNode = std::make_shared<filenode>(L"\\", true,
                                              FILE_ATTRIBUTE_DIRECTORY, nullptr);
   fileNode->security.SetDescriptor(security_descriptor);
@@ -95,14 +89,14 @@ fs_filenodes::fs_filenodes() {
   _directoryPaths.emplace(L"\\", std::set<std::shared_ptr<filenode>>());
 }
 
-NTSTATUS fs_filenodes::add(const std::shared_ptr<filenode>& f) {
+NTSTATUS fs_filenodes::add(const std::shared_ptr<filenode> &f,
+                  std::optional<std::pair<std::wstring, std::wstring>> stream_names) {
   std::lock_guard<std::recursive_mutex> lock(_filesnodes_mutex);
 
   if (f->fileindex == 0)  // previous init
     f->fileindex = _fs_fileindex_count++;
   const auto filename = f->get_filename();
-  const auto parent_path =
-      std::filesystem::path(filename).parent_path().wstring();
+  const auto parent_path = memfs_helper::GetParentPath(filename);
 
   // Does target folder exist
   if (!_directoryPaths.count(parent_path)) {
@@ -111,15 +105,18 @@ NTSTATUS fs_filenodes::add(const std::shared_ptr<filenode>& f) {
     return STATUS_OBJECT_PATH_NOT_FOUND;
   }
 
-  auto stream_names = memfs_helper::GetStreamNames(filename);
-  if (!stream_names.second.empty()) {
+  if (!stream_names.has_value())
+    stream_names = memfs_helper::GetStreamNames(filename);
+  if (!stream_names.value().second.empty()) {
+    auto &stream_names_value = stream_names.value();
     spdlog::info(
         L"Add file: {} is an alternate stream {} and has {} as main stream",
-        filename, stream_names.second, stream_names.first);
+        filename, stream_names_value.second, stream_names_value.first);
     auto main_stream_name =
-        memfs_helper::GetFileName(filename, stream_names);
+        memfs_helper::GetFileNameStreamLess(filename, stream_names_value);
     auto main_f = find(main_stream_name);
-    if (!main_f) return STATUS_OBJECT_PATH_NOT_FOUND;
+    if (!main_f)
+      return STATUS_OBJECT_PATH_NOT_FOUND;
     main_f->add_stream(f);
     f->main_stream = main_f;
     f->fileindex = main_f->fileindex;
@@ -130,8 +127,11 @@ NTSTATUS fs_filenodes::add(const std::shared_ptr<filenode>& f) {
     _directoryPaths.emplace(filename, std::set<std::shared_ptr<filenode>>());
 
   // Add our file to the fileNodes and directoryPaths
+  auto previous_f = _filenodes[filename];
   _filenodes[filename] = f;
   _directoryPaths[parent_path].insert(f);
+  if (previous_f)
+    _directoryPaths[parent_path].erase(previous_f);
 
   spdlog::info(L"Add file: {} in folder: {}", filename, parent_path);
   return STATUS_SUCCESS;
@@ -165,7 +165,7 @@ void fs_filenodes::remove(const std::shared_ptr<filenode>& f) {
 
   // Remove node from fileNodes and directoryPaths
   _filenodes.erase(fileName);
-  _directoryPaths[std::filesystem::path(fileName).parent_path()].erase(f);
+  _directoryPaths[memfs_helper::GetParentPath(fileName)].erase(f);
 
   // if it was a directory we need to remove it from directoryPaths
   if (f->is_directory) {
@@ -208,8 +208,7 @@ NTSTATUS fs_filenodes::move(const std::wstring& old_filename,
   if (new_f && (f->is_directory || new_f->is_directory))
     return STATUS_ACCESS_DENIED;
 
-  auto newParent_path =
-      std::filesystem::path(new_filename).parent_path().wstring();
+  auto newParent_path = memfs_helper::GetParentPath(new_filename);
 
   std::lock_guard<std::recursive_mutex> lock(_filesnodes_mutex);
   if (!_directoryPaths.count(newParent_path)) {
@@ -223,12 +222,12 @@ NTSTATUS fs_filenodes::move(const std::wstring& old_filename,
 
   // Update current node with new data
   const auto fileName = f->get_filename();
-  auto oldParentPath = std::filesystem::path(fileName).parent_path();
+  auto oldParentPath = memfs_helper::GetParentPath(fileName);
   f->set_filename(new_filename);
 
   // Move fileNode
   // 1 - by removing current not with oldName as key
-  add(f);
+  add(f, {});
 
   // 2 - If fileNode is a Dir we move content to destination
   if (f->is_directory) {
@@ -236,10 +235,9 @@ NTSTATUS fs_filenodes::move(const std::wstring& old_filename,
     auto files = list_folder(old_filename);
     for (const auto& file : files) {
       const auto sub_fileName = file->get_filename();
-      auto newSubFileName =
-          std::filesystem::path(new_filename)
-              .append(std::filesystem::path(sub_fileName).filename().wstring())
-              .wstring();
+      auto newSubFileName = std::filesystem::path(new_filename)
+                                .append(memfs_helper::GetFileName(sub_fileName))
+                                .wstring();
       auto n = move(sub_fileName, newSubFileName, replace_if_existing);
       if (n != STATUS_SUCCESS) {
         spdlog::warn(

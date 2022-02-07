@@ -34,10 +34,11 @@ void show_usage() {
   spdlog::error("memfs.exe - Dokan Memory filesystem that can be mounted as a local or network drive.\n"
                 "  /l MountPoint (ex. /l m)\t\t\t Mount point. Can be M:\\ (drive letter) or empty NTFS folder C:\\mount\\dokan .\n"
                 "  /m (use removable drive)\t\t\t Show device as removable media.\n"
+                "  /n (Network drive with UNC name ex. \\myfs\\fs1) Show device as network device with a UNC name.\n"
                 "  /c (mount for current session only)\t\t Device only visible for current user session.\n"
                 "  /n (use network drive)\t\t\t Show device as network device.\n"
                 "  /u (UNC provider name ex. \\localhost\\myfs)\t UNC name used for network volume.\n"
-                "  /t ThreadCount (ex. /t 5)\t\t\t Number of threads to be used internally by Dokan library.\n\t\t\t\t\t\t More threads will handle more event at the same time.\n"
+                "  /t Single thread\t\t\t\t Only use a single thread to process events.\n\t\t\t\t\t\t This is highly not recommended as can easily create a bottleneck.\n"
                 "  /d (enable debug output)\t\t\t Enable debug output to an attached debugger.\n"
                 "  /i (Timeout in Milliseconds ex. /i 30000)\t Timeout until a running operation is aborted and the device is unmounted.\n"
                 "  /x (network unmount)\t\t\t\t Allows unmounting network drive from file explorer\n"
@@ -51,17 +52,32 @@ void show_usage() {
   // clang-format on
 }
 
+std::shared_ptr<memfs::memfs> dokan_memfs;
+
+BOOL WINAPI ctrl_handler(DWORD dw_ctrl_type) {
+  switch (dw_ctrl_type) {
+  case CTRL_C_EVENT:
+  case CTRL_BREAK_EVENT:
+  case CTRL_CLOSE_EVENT:
+  case CTRL_LOGOFF_EVENT:
+  case CTRL_SHUTDOWN_EVENT:
+    SetConsoleCtrlHandler(ctrl_handler, FALSE);
+    dokan_memfs->stop();
+    return TRUE;
+  default:
+    return FALSE;
+  }
+}
+
 int __cdecl wmain(ULONG argc, PWCHAR argv[]) {
   try {
-    auto dokan_memfs = std::make_shared<memfs::memfs>();
+    dokan_memfs = std::make_shared<memfs::memfs>();
     // Parse arguments
     for (ULONG i = 1; i < argc; ++i) {
       std::wstring arg = argv[i];
       if (arg == L"/h") {
         show_usage();
         return 0;
-      } else if (arg == L"/n") {
-        dokan_memfs->network_drive = true;
       } else if (arg == L"/m") {
         dokan_memfs->removable_drive = true;
       } else if (arg == L"/c") {
@@ -72,6 +88,8 @@ int __cdecl wmain(ULONG argc, PWCHAR argv[]) {
         dokan_memfs->enable_network_unmount = true;
       } else if (arg == L"/e") {
         dokan_memfs->dispatch_driver_logs = true;
+      } else if (arg == L"/t") {
+        dokan_memfs->single_thread = true;
       } else {
         if (i + 1 >= argc) {
           show_usage();
@@ -84,17 +102,22 @@ int __cdecl wmain(ULONG argc, PWCHAR argv[]) {
           wcscpy_s(dokan_memfs->mount_point,
                    sizeof(dokan_memfs->mount_point) / sizeof(WCHAR),
                    extra_arg.c_str());
-        } else if (arg == L"/u") {
+        } else if (arg == L"/n") {
+          dokan_memfs->network_drive = true;
           wcscpy_s(dokan_memfs->unc_name,
                    sizeof(dokan_memfs->unc_name) / sizeof(WCHAR),
                    extra_arg.c_str());
-        } else if (arg == L"/t") {
-          dokan_memfs->thread_number = std::stoi(extra_arg);
         }
       }
     }
+    if (!SetConsoleCtrlHandler(ctrl_handler, TRUE)) {
+      spdlog::error("Control Handler is not set: {}", GetLastError());
+    }
+    DokanInit();
     // Start the memory filesystem
-    dokan_memfs->run();
+    dokan_memfs->start();
+    dokan_memfs->wait();
+    DokanShutdown();
   } catch (const std::exception& ex) {
     spdlog::error("dokan_memfs failure: {}", ex.what());
     return 1;

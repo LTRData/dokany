@@ -454,6 +454,113 @@ DokanGlobalUserFsRequest(__in PREQUEST_CONTEXT RequestContext) {
   return STATUS_INVALID_DEVICE_REQUEST;
 }
 
+NTSTATUS PullEvents(__in PREQUEST_CONTEXT RequestContext,
+                    __in PIRP_LIST NotifyEvent) {
+  PDRIVER_EVENT_CONTEXT workItem = NULL;
+  PDRIVER_EVENT_CONTEXT alreadySeenWorkItem = NULL;
+  PLIST_ENTRY workItemListEntry = NULL;
+  KIRQL workQueueIrql;
+  ULONG workItemBytes = 0;
+  ULONG currentIoctlBufferBytesRemaining =
+      RequestContext->IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+  PCHAR currentIoctlBuffer =
+      (PCHAR)RequestContext->Irp->AssociatedIrp.SystemBuffer;
+
+  ASSERT(KeGetCurrentIrql() <= DISPATCH_LEVEL);
+  KeAcquireSpinLock(&NotifyEvent->ListLock, &workQueueIrql);
+  while (!IsListEmpty(&NotifyEvent->ListHead)) {
+    workItemListEntry = RemoveHeadList(&NotifyEvent->ListHead);
+    workItem =
+        CONTAINING_RECORD(workItemListEntry, DRIVER_EVENT_CONTEXT, ListEntry);
+    workItemBytes = workItem->EventContext.Length;
+    // Buffer is not specified or short of length (this may mean we filled the
+    // space in one of the DLL's buffers in batch mode). Put the IRP back in
+    // the work queue; it will have to go in a different buffer.
+    if (currentIoctlBufferBytesRemaining < workItemBytes) {
+      InsertTailList(&NotifyEvent->ListHead, &workItem->ListEntry);
+      if (alreadySeenWorkItem == workItem) {
+        // We have reached the end of the list
+        break;
+      }
+      if (!alreadySeenWorkItem) {
+        alreadySeenWorkItem = workItem;
+      }
+      continue;
+    }
+    // Send the work item back in the response to the current IOCTL.
+    RtlCopyMemory(currentIoctlBuffer, &workItem->EventContext, workItemBytes);
+    currentIoctlBufferBytesRemaining -= workItemBytes;
+    currentIoctlBuffer += workItemBytes;
+    RequestContext->Irp->IoStatus.Information += workItemBytes;
+    ExFreePool(workItem);
+    if (!RequestContext->Dcb->AllowIpcBatching) {
+      break;
+    }
+  }
+  // If there is still pending items we need to reflag the queue for when we come back
+  if (!IsListEmpty(&NotifyEvent->ListHead) &&
+       !KeReadStateQueue(&RequestContext->Dcb->NotifyIrpEventQueue)) {
+     KeInsertQueue(&RequestContext->Dcb->NotifyIrpEventQueue,
+                   &RequestContext->Dcb->NotifyIrpEventQueueList);
+  }
+  KeReleaseSpinLock(&NotifyEvent->ListLock, workQueueIrql);
+  RequestContext->Irp->IoStatus.Status = STATUS_SUCCESS;
+  return RequestContext->Irp->IoStatus.Status;
+}
+
+
+NTSTATUS DokanProcessAndPullEvents(__in PREQUEST_CONTEXT RequestContext) {
+  // 1 - Complete the optional event.
+  // Main pull thread will not have events to complete when:
+  // * The file system just started and it is the first pull.
+  // * The event completed had no answer to send like Close().
+  // Other threads from the pool will have an EVENT_INFORMATION
+  // to complete that include the wait timeout for new events.
+  NTSTATUS status = DokanCompleteIrp(RequestContext);
+  if (status != STATUS_BUFFER_TOO_SMALL && status != STATUS_SUCCESS) {
+    DOKAN_LOG_FINE_IRP(RequestContext, "Failed to process IRP");
+    return status;
+  }
+
+  // 2 - Ensure we have enough space to at least store an event before waiting.
+  if (RequestContext->IrpSp->Parameters.DeviceIoControl.OutputBufferLength <
+      sizeof(EVENT_CONTEXT)) {
+    DOKAN_LOG_FINE_IRP(RequestContext, "No output buffer provided");
+    return status;
+  }
+  // 3 - Flag the device as having workers starting to pull events.
+  RequestContext->Vcb->HasEventWait = TRUE;
+
+  PEVENT_INFORMATION eventInfo =
+      (PEVENT_INFORMATION)(RequestContext->Irp->AssociatedIrp.SystemBuffer);
+  ULONG waitTimeoutMs =
+      status == STATUS_BUFFER_TOO_SMALL ? 0 : eventInfo->PullEventTimeoutMs;
+  LARGE_INTEGER timeout;
+  if (waitTimeoutMs) {
+    DokanQuerySystemTime(&timeout);
+    timeout.QuadPart += (LONGLONG)waitTimeoutMs * 10000; // Ms to 100 nano
+  }
+
+  // 4 - Wait for new event indefinitely if we are the main pull thread
+  // or wait for the requested time.
+  PLIST_ENTRY listEntry;
+  KeRemoveQueueEx(&RequestContext->Dcb->NotifyIrpEventQueue, KernelMode, TRUE,
+                  waitTimeoutMs ? &timeout : NULL, &listEntry, 1);
+  if (listEntry != &RequestContext->Dcb->NotifyIrpEventQueueList) {
+    // Here we got interrupted: Alert / Timeout.
+    // In that case listEntry is an NTSTATUS (See KeRemoveQueue doc).
+
+    // Were we awake due to the device being unmount ?
+    if (IsUnmountPendingVcb(RequestContext->Vcb)) {
+      return STATUS_NO_SUCH_DEVICE;
+    }
+    return STATUS_SUCCESS;
+  }
+
+  // 5 - Fill the provided buffer as much as we can with events.
+  return PullEvents(RequestContext, &RequestContext->Dcb->NotifyEvent);
+}
+
 NTSTATUS
 DokanDiskUserFsRequest(__in PREQUEST_CONTEXT RequestContext) {
   REQUEST_CONTEXT requestContext = *RequestContext;
@@ -461,10 +568,8 @@ DokanDiskUserFsRequest(__in PREQUEST_CONTEXT RequestContext) {
   // following function to expected being called to a Dcb.
   requestContext.Vcb = requestContext.Dcb->Vcb;
   switch (RequestContext->IrpSp->Parameters.FileSystemControl.FsControlCode) {
-    case FSCTL_EVENT_WAIT:
-      return DokanRegisterPendingIrpForEvent(&requestContext);
-    case FSCTL_EVENT_INFO:
-      return DokanCompleteIrp(&requestContext);
+    case FSCTL_EVENT_PROCESS_N_PULL:
+      return DokanProcessAndPullEvents(&requestContext);
     case FSCTL_EVENT_RELEASE:
       return DokanEventRelease(&requestContext, requestContext.Vcb->DeviceObject);
     case FSCTL_EVENT_WRITE:
@@ -579,6 +684,7 @@ NTSTATUS SendDirectoryFsctl(PREQUEST_CONTEXT RequestContext,
   HANDLE handle = 0;
   PUNICODE_STRING directoryStr = NULL;
   NTSTATUS status = STATUS_SUCCESS;
+  PIRP topLevelIrp = NULL;
   DOKAN_INIT_LOGGER(logger, RequestContext->DeviceObject->DriverObject,
                     IRP_MJ_FILE_SYSTEM_CONTROL);
 
@@ -591,6 +697,11 @@ NTSTATUS SendDirectoryFsctl(PREQUEST_CONTEXT RequestContext,
       DokanLogError(&logger, status, L"Failed to change prefix for \"%wZ\"\n",
                     Path);
       __leave;
+    }
+
+    if (RequestContext->IsTopLevelIrp) {
+      topLevelIrp = IoGetTopLevelIrp();
+      IoSetTopLevelIrp(NULL);
     }
 
     // Open the directory as \??\C:\foo
@@ -621,11 +732,14 @@ NTSTATUS SendDirectoryFsctl(PREQUEST_CONTEXT RequestContext,
       __leave;
     }
   } __finally {
-   if (directoryStr) {
+    if (directoryStr) {
       DokanFreeUnicodeString(directoryStr);
     }
     if (handle) {
       ZwClose(handle);
+    }
+    if (topLevelIrp) {
+      IoSetTopLevelIrp(topLevelIrp);
     }
   }
 
@@ -644,6 +758,9 @@ NTSTATUS DokanMountVolume(__in PREQUEST_CONTEXT RequestContext) {
   PDEVICE_OBJECT volDeviceObject;
   PDRIVER_OBJECT driverObject = RequestContext->DeviceObject->DriverObject;
   NTSTATUS status = STATUS_UNRECOGNIZED_VOLUME;
+  // Note: this can't live on DOKAN_GLOBAL because we can't reliably access that
+  // in the case where we use this.
+  static LONG hasMountedAnyDisk = 0;
 
   DOKAN_INIT_LOGGER(logger, driverObject, IRP_MJ_FILE_SYSTEM_CONTROL);
   DOKAN_LOG_FINE_IRP(RequestContext, "Mounting disk device.");
@@ -651,15 +768,43 @@ NTSTATUS DokanMountVolume(__in PREQUEST_CONTEXT RequestContext) {
   PDEVICE_OBJECT deviceObject =
       RequestContext->IrpSp->Parameters.MountVolume.DeviceObject;
   dcb = deviceObject->DeviceExtension;
-  if (!dcb) {
-    DOKAN_LOG_FINE_IRP(RequestContext,
-                       "Not DokanDiskDevice (no device extension)");
-    return status;
+  PDEVICE_OBJECT lowerDeviceObject = NULL;
+  while (!MatchDokanDCBType(RequestContext, dcb, &logger,
+                            /*LogFailures=*/!hasMountedAnyDisk)) {
+    PDEVICE_OBJECT parentDeviceObject =
+        lowerDeviceObject ? lowerDeviceObject : deviceObject;
+    lowerDeviceObject = IoGetLowerDeviceObject(parentDeviceObject);
+    if (parentDeviceObject != deviceObject) {
+      ObDereferenceObject(parentDeviceObject);
+    }
+    if (!lowerDeviceObject) {
+      if (!hasMountedAnyDisk) {
+        // We stop logging wrapped devices once we successfully mount any disk,
+        // because otherwise these messages generate useless noise when the file
+        // system gets random mount requests for non-dokan disks.
+        DOKAN_LOG_FINE_IRP(
+            RequestContext,
+            "Not mounting because there is no matching DCB. This is"
+            " expected, if a non-DriveFS device is being mounted. If"
+            " this prevents DriveFS startup, it may mean the DriveFS"
+            " device has its identity obscured by a filter driver.");
+      }
+      return STATUS_UNRECOGNIZED_VOLUME;
+    }
+    if (!hasMountedAnyDisk) {
+      DOKAN_LOG_FINE_IRP(RequestContext,
+                         "Processing the lower level DeviceObject, in case"
+                         " this is a DriveFS device wrapped by a filter.");
+    }
+    dcb = lowerDeviceObject->DeviceExtension;
+  }
+  if (lowerDeviceObject) {
+    ObDereferenceObject(lowerDeviceObject);
   }
 
-  if (GetIdentifierType(dcb) != DCB) {
-    DOKAN_LOG_FINE_IRP(RequestContext, "Not DokanDiskDevice");
-    return status;
+  if (dcb->Global->DriverVersion != DOKAN_DRIVER_VERSION) {
+    return DokanLogError(&logger, STATUS_UNRECOGNIZED_VOLUME,
+                         L"The driver version of the disk does not match.");
   }
 
   if (IsDeletePending(dcb->DeviceObject)) {
@@ -716,7 +861,8 @@ NTSTATUS DokanMountVolume(__in PREQUEST_CONTEXT RequestContext) {
     DokanStartFcbGarbageCollector(vcb);
   }
 
-  InitializeListHead(&vcb->NextFCB);
+  RtlInitializeGenericTableAvl(&vcb->FcbTable, DokanCompareFcb,
+                               DokanAllocateFcbAvl, DokanFreeFcbAvl, vcb);
 
   InitializeListHead(&vcb->DirNotifyList);
   FsRtlNotifyInitializeSync(&vcb->NotifySync);
@@ -763,9 +909,6 @@ NTSTATUS DokanMountVolume(__in PREQUEST_CONTEXT RequestContext) {
   ExReleaseResourceLite(&dcb->Resource);
 
   // Start check thread
-  ExAcquireResourceExclusiveLite(&dcb->Resource, TRUE);
-  DokanUpdateTimeout(&dcb->TickCount, DOKAN_KEEPALIVE_TIMEOUT_DEFAULT * 3);
-  ExReleaseResourceLite(&dcb->Resource);
   DokanStartCheckThread(dcb);
 
   BOOLEAN isDriveLetter = IsMountPointDriveLetter(dcb->MountPoint);
@@ -799,9 +942,7 @@ NTSTATUS DokanMountVolume(__in PREQUEST_CONTEXT RequestContext) {
       }
       ExReleaseResourceLite(&dcb->Global->MountManagerLock);
     }
-  }
-
-  if (isDriveLetter) {
+  } else if (isDriveLetter) {
     DokanCreateMountPoint(dcb);
   }
 
@@ -809,6 +950,7 @@ NTSTATUS DokanMountVolume(__in PREQUEST_CONTEXT RequestContext) {
     RunAsSystem(DokanRegisterUncProvider, dcb);
   }
 
+  InterlockedOr(&hasMountedAnyDisk, 1);
   DokanLogInfo(&logger, L"Mounting successfully done.");
   DOKAN_LOG_FINE_IRP(RequestContext, "Mounting successfully done.");
 

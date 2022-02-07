@@ -48,8 +48,7 @@ PDokanCCB DokanAllocateCCB(__in PREQUEST_CONTEXT RequestContext, __in PDokanFCB 
   ccb->Identifier.Size = sizeof(DokanCCB);
 
   ccb->Fcb = Fcb;
-  DOKAN_LOG_FINE_IRP(RequestContext, "Allocated CCB");
-  ExInitializeResourceLite(&ccb->Resource);
+  DOKAN_LOG_FINE_IRP(RequestContext, "Allocated CCB=%p", ccb);
 
   InitializeListHead(&ccb->NextCCB);
 
@@ -103,8 +102,6 @@ DokanFreeCCB(__in PREQUEST_CONTEXT RequestContext, __in PDokanCCB ccb) {
   }
 
   DokanFCBUnlock(fcb);
-
-  ExDeleteResourceLite(&ccb->Resource);
 
   if (ccb->SearchPattern) {
     ExFreePool(ccb->SearchPattern);
@@ -332,7 +329,8 @@ Otherwise, STATUS_SHARING_VIOLATION is returned.
 VOID DokanRetryCreateAfterOplockBreak(__in PVOID Context, __in PIRP Irp) {
   REQUEST_CONTEXT requestContext;
   NTSTATUS status =
-      DokanBuildRequestContext((PDEVICE_OBJECT)Context, Irp, &requestContext);
+      DokanBuildRequestContext((PDEVICE_OBJECT)Context, Irp,
+                               /*IsTopLevelIrp=*/FALSE, &requestContext);
   if (!NT_SUCCESS(status)) {
     DOKAN_LOG_("Failed to build request context for IRP=%p Status=%s", Irp,
                DokanGetNTSTATUSStr(status));
@@ -393,7 +391,6 @@ Return Value:
   BOOLEAN eventContextConsumed = FALSE;
   DWORD disposition = 0;
   BOOLEAN fcbLocked = FALSE;
-  BOOLEAN caseInSensitive = TRUE;
   DOKAN_INIT_LOGGER(logger, RequestContext->DeviceObject->DriverObject,
                     IRP_MJ_CREATE);
 
@@ -599,9 +596,6 @@ Return Value:
       __leave;
     }
 
-    caseInSensitive =
-        !(RequestContext->Dcb->MountOptions & DOKAN_EVENT_CASE_SENSITIVE);
-
     // this memory is freed by DokanGetFCB if needed
     // "+ sizeof(WCHAR)" is for the last NULL character
     fileName = DokanAllocZero(fileNameLength + sizeof(WCHAR));
@@ -670,11 +664,9 @@ Return Value:
           fileName = NULL;
           __leave;
         }
-        fcb = DokanGetFCB(RequestContext, parentDir, parentDirLength,
-                          caseInSensitive);
+        fcb = DokanGetFCB(RequestContext, parentDir, parentDirLength);
       } else {
-        fcb = DokanGetFCB(RequestContext, fileName, fileNameLength,
-                          caseInSensitive);
+        fcb = DokanGetFCB(RequestContext, fileName, fileNameLength);
       }
       if (fcb == NULL) {
         status = STATUS_INSUFFICIENT_RESOURCES;
@@ -765,7 +757,6 @@ Return Value:
                 &RequestContext->IrpSp->Parameters.Create.SecurityContext
                      ->AccessState->SubjectSecurityContext,
                 IoGetFileObjectGenericMapping(), PagedPool) == STATUS_SUCCESS) {
-
           securityDescriptorSize = PointerAlignSize(
               RtlLengthSecurityDescriptor(newFileSecurityDescriptor));
         } else {

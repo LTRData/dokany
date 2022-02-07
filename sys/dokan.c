@@ -165,7 +165,7 @@ DokanFilterCallbackAcquireForCreateSection(__in PFS_FILTER_CALLBACK_DATA
 }
 
 BOOLEAN
-DokanLookasideCreate(LOOKASIDE_LIST_EX *pCache, size_t cbElement) {
+DokanLookasideCreate(__in LOOKASIDE_LIST_EX *pCache, __in size_t cbElement) {
   NTSTATUS Status = ExInitializeLookasideListEx(
       pCache, NULL, NULL, NonPagedPool, 0, cbElement, TAG, 0);
 
@@ -710,7 +710,7 @@ VOID DokanLockNotifyResolved(__in const ERESOURCE *Resource,
   DbgPrintEx(
       DPFLTR_IHVDRIVER_ID,
       DPFLTR_TRACE_LEVEL,
-      "Blocking on ERESOURCE %I64x has resolved on thread %I64x",
+      "Blocking on ERESOURCE %I64x has resolved on thread %I64x\n",
       Resource,
       KeGetCurrentThread());
 }

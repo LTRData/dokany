@@ -32,51 +32,9 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 NTSTATUS
 GlobalDeviceControl(__in PREQUEST_CONTEXT RequestContext) {
   NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
-
-  switch (RequestContext->IrpSp->Parameters.DeviceIoControl.IoControlCode) {
-  case IOCTL_EVENT_START:
-    status = DokanEventStart(RequestContext);
-    break;
-
-  case IOCTL_SET_DEBUG_MODE: {
-    PULONG pDebug = NULL;
-    GET_IRP_BUFFER_OR_BREAK(RequestContext->Irp, pDebug);
-    g_Debug = *pDebug;
-    status = STATUS_SUCCESS;
-    DOKAN_LOG_FINE_IRP(RequestContext, "Set debug mode: %d", g_Debug);
-  } break;
-
-  case IOCTL_EVENT_RELEASE:
-    status = DokanGlobalEventRelease(RequestContext);
-    break;
-
-  case IOCTL_MOUNTPOINT_CLEANUP:
-    RemoveSessionDevices(RequestContext, GetCurrentSessionId(RequestContext));
-    status = STATUS_SUCCESS;
-    break;
-
-  case IOCTL_EVENT_MOUNTPOINT_LIST:
-    status = DokanGetMountPointList(RequestContext);
-    break;
-
-  case IOCTL_GET_VERSION: {
-    ULONG* version;
-    if (!PREPARE_OUTPUT(RequestContext->Irp, version,
-                        /*SetInformationOnFailure=*/FALSE)) {
-      break;
-    }
-    *version = (ULONG) DOKAN_DRIVER_VERSION;
-    status = STATUS_SUCCESS;
-  } break;
-
-  default:
-    status = STATUS_INVALID_PARAMETER;
     DOKAN_LOG_FINE_IRP(
         RequestContext, "Unsupported IoControlCode %x",
         RequestContext->IrpSp->Parameters.DeviceIoControl.IoControlCode);
-    break;
-  }
-
   return status;
 }
 
@@ -366,12 +324,23 @@ DiskDeviceControl(__in PREQUEST_CONTEXT RequestContext,
       // Invoked when the mount manager is considering assigning a drive letter
       // to a newly mounted volume. This lets us make a non-binding request for
       // a certain drive letter before assignment happens.
+      DokanLogInfo(&logger,
+                   L"Mount manager is querying for desired drive letter."
+                   L" ForceDriveLetterAutoAssignment = %d",
+                   dcb->ForceDriveLetterAutoAssignment);
 
       PMOUNTDEV_SUGGESTED_LINK_NAME linkName;
       if (!PrepareOutputHelper(RequestContext->Irp, &linkName,
                                FIELD_OFFSET(MOUNTDEV_SUGGESTED_LINK_NAME, Name),
                           /*SetInformationOnFailure=*/TRUE)) {
         status = STATUS_BUFFER_TOO_SMALL;
+        break;
+      }
+      if (dcb->ForceDriveLetterAutoAssignment) {
+        DokanLogInfo(&logger,
+                     L"Not suggesting a link name because auto-assignment was "
+                     L"requested.");
+        status = STATUS_NOT_FOUND;
         break;
       }
       if (dcb->MountPoint == NULL || dcb->MountPoint->Length == 0) {
@@ -392,7 +361,7 @@ DiskDeviceControl(__in PREQUEST_CONTEXT RequestContext,
 
       // Return the drive letter. Generally this is the one specified in the
       // mount request from user mode.
-      linkName->UseOnlyIfThereAreNoOtherLinks = FALSE;
+      linkName->UseOnlyIfThereAreNoOtherLinks = TRUE;
       linkName->NameLength = dcb->MountPoint->Length;
       if (!AppendVarSizeOutputString(RequestContext->Irp, &linkName->Name,
                                      dcb->MountPoint,
@@ -739,10 +708,6 @@ IsVolumeOpen(__in PDokanVCB Vcb, __in PFILE_OBJECT FileObject) {
 }
 
 NTSTATUS DokanGetVolumeMetrics(__in PREQUEST_CONTEXT RequestContext) {
-  // TODO(adrienj): Remove the check when moving to FSCTL only.
-  if (RequestContext->Vcb == NULL) {
-    return STATUS_INVALID_PARAMETER;
-  }
   VOLUME_METRICS* outputBuffer;
   if (!PREPARE_OUTPUT(RequestContext->Irp, outputBuffer,
                       /*SetInformationOnFailure=*/TRUE)) {
@@ -758,71 +723,38 @@ NTSTATUS
 VolumeDeviceControl(__in PREQUEST_CONTEXT RequestContext) {
   NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
 
-  switch (RequestContext->IrpSp->Parameters.DeviceIoControl.IoControlCode) {
-    case IOCTL_EVENT_WAIT:
-      status = DokanRegisterPendingIrpForEvent(RequestContext);
+  ULONG baseCode = DEVICE_TYPE_FROM_CTL_CODE(
+      RequestContext->IrpSp->Parameters.DeviceIoControl.IoControlCode);
+  switch (baseCode) {
+    case IOCTL_STORAGE_BASE:
+    case IOCTL_DISK_BASE:
+    case FILE_DEVICE_NETWORK_FILE_SYSTEM:
+      status = DiskDeviceControlWithLock(RequestContext,
+                                         RequestContext->Dcb->DeviceObject);
       break;
-    case IOCTL_EVENT_INFO:
-      status = DokanCompleteIrp(RequestContext);
-      break;
-    case IOCTL_EVENT_RELEASE:
-      status = DokanEventRelease(RequestContext, RequestContext->DeviceObject);
-      break;
-    case IOCTL_EVENT_WRITE:
-      status = DokanEventWrite(RequestContext);
-      break;
-    case IOCTL_GET_VOLUME_METRICS:
-      status = DokanGetVolumeMetrics(RequestContext);
-      break;
-    case IOCTL_KEEPALIVE: {
-      //Remove for Dokan 2.x.x
-      if (!IsFlagOn(RequestContext->Vcb->Flags, VCB_MOUNTED)) {
-        status = STATUS_INSUFFICIENT_RESOURCES;
-      }
-      ExEnterCriticalRegionAndAcquireResourceExclusive(
-          &RequestContext->Dcb->Resource);
-      DokanUpdateTimeout(&RequestContext->Dcb->TickCount,
-                         DOKAN_KEEPALIVE_TIMEOUT_DEFAULT);
-      ExReleaseResourceAndLeaveCriticalRegion(&RequestContext->Dcb->Resource);
-      status = STATUS_SUCCESS;
-    } break;
-    case IOCTL_RESET_TIMEOUT:
-      status = DokanResetPendingIrpTimeout(RequestContext);
-      break;
-    case IOCTL_GET_ACCESS_TOKEN:
-      status = DokanGetAccessToken(RequestContext);
-      break;
-    default: {
-      // TODO: The early check fails some IFSTEST (Network) should make
-      // an exception for them. Disabling the volume open check for now.
+
+    case MOUNTDEVCONTROLTYPE:
       // Device control functions are only supposed to work on a volume handle.
       // Some win32 functions, like GetVolumePathName, rely on these operations
       // failing for file/directory handles. On the other hand, dokan issues its
       // custom operations on non-volume handles, so we can't do this check at
       // the top.
-      /*if (!IsVolumeOpen(RequestContext->Vcb,
-                        RequestContext->IrpSp->FileObject)) {
+      if (!IsVolumeOpen(RequestContext->Vcb,
+                       RequestContext->IrpSp->FileObject)) {
         status = STATUS_INVALID_PARAMETER;
         break;
-      }*/
-      ULONG baseCode = DEVICE_TYPE_FROM_CTL_CODE(
-          RequestContext->IrpSp->Parameters.DeviceIoControl.IoControlCode);
-      // In case of IOCTL_STORAGE_BASE or IOCTL_DISK_BASE OR
-      // FILE_DEVICE_NETWORK_FILE_SYSTEM or MOUNTDEVCONTROLTYPE ioctl type, pass
-      // to DiskDeviceControl to avoid code duplication
-      // TODO: probably not the best way to pass down Irp...
-      if (baseCode == IOCTL_STORAGE_BASE || baseCode == IOCTL_DISK_BASE ||
-          baseCode == FILE_DEVICE_NETWORK_FILE_SYSTEM ||
-          baseCode == MOUNTDEVCONTROLTYPE) {
-        status = DiskDeviceControlWithLock(RequestContext,
-                                           RequestContext->Dcb->DeviceObject);
-      } else {
-        DOKAN_LOG_FINE_IRP(
-            RequestContext, "Unsupported IoControlCode %x",
-            RequestContext->IrpSp->Parameters.DeviceIoControl.IoControlCode);
       }
-    } break;
-  }  // switch IoControlCode
+      status = DiskDeviceControlWithLock(RequestContext,
+                                         RequestContext->Dcb->DeviceObject);
+      break;
+
+    default:
+      DOKAN_LOG_FINE_IRP(
+          RequestContext, "Unsupported IoControlCode %x",
+          RequestContext->IrpSp->Parameters.DeviceIoControl.IoControlCode);
+      break;
+  }
+
   return status;
 }
 

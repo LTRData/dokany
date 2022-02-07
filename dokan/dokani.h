@@ -30,10 +30,17 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include "dokan.h"
 #include "dokanc.h"
 #include "list.h"
+#include "dokan_vector.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+typedef struct _DOKAN_INSTANCE_THREADINFO {
+  PTP_POOL ThreadPool;
+  PTP_CLEANUP_GROUP CleanupGroup;
+  TP_CALLBACK_ENVIRON CallbackEnvironment;
+} DOKAN_INSTANCE_THREADINFO;
 
 /**
  * \struct DOKAN_INSTANCE
@@ -47,29 +54,39 @@ extern "C" {
 typedef struct _DOKAN_INSTANCE {
   /** to ensure that unmount dispatch is called at once */
   CRITICAL_SECTION CriticalSection;
-
   /**
-  * Current DeviceName.
-  * When there are many mounts, each mount uses different DeviceName.
-  */
+   * Current DeviceName.
+   * When there are many mounts, each mount uses different DeviceName.
+   */
   WCHAR DeviceName[64];
   /** Mount point. Can be "M:\" (drive letter) or "C:\mount\dokan" (path in NTFS) */
   WCHAR MountPoint[MAX_PATH];
   /** UNC name used for network volume */
   WCHAR UNCName[64];
-
   /** Device number */
   ULONG DeviceNumber;
   /** Mount ID */
   ULONG MountId;
-
   /** DOKAN_OPTIONS linked to the mount */
   PDOKAN_OPTIONS DokanOptions;
   /** DOKAN_OPERATIONS linked to the mount */
   PDOKAN_OPERATIONS DokanOperations;
-
   /** Current list entry informations */
   LIST_ENTRY ListEntry;
+  /** Global Dokan Kernel device handle */
+  HANDLE GlobalDevice;
+  /** Device handle used to communicate with the kernel mount instance */
+  HANDLE Device;
+  /** Device unmount event. It is set when the device is stopped */
+  HANDLE DeviceClosedWaitHandle;
+  /** Thread pool context of the mount instance */
+  DOKAN_INSTANCE_THREADINFO ThreadInfo;
+  /** Handle with the notify file opened at mount */
+  HANDLE NotifyHandle;
+  /** Handle of the Keepalive file opened at mount */
+  HANDLE KeepaliveHandle;
+  /** Whether the filesystem was intentionally stopped */
+  BOOL FileSystemStopped;
 } DOKAN_INSTANCE, *PDOKAN_INSTANCE;
 
 /**
@@ -79,27 +96,104 @@ typedef struct _DOKAN_INSTANCE {
  * This is created in CreateFile and will be freed in CloseFile.
  */
 typedef struct _DOKAN_OPEN_INFO {
+  CRITICAL_SECTION CriticalSection;
+  /** Dokan instance linked to the open */
+  PDOKAN_INSTANCE DokanInstance;
+  PDOKAN_VECTOR DirList;
+  PWCHAR DirListSearchPattern;
+  /** User Context see DOKAN_FILE_INFO.Context */
+  volatile LONG64 UserContext;
+  /** Event Id */
+  ULONG EventId;
   /** DOKAN_OPTIONS linked to the mount */
   BOOL IsDirectory;
   /** Open count on the file */
   ULONG OpenCount;
-  /** Event context */
-  PEVENT_CONTEXT EventContext;
-  /** Dokan instance linked to the open */
-  PDOKAN_INSTANCE DokanInstance;
-  /** User Context see DOKAN_FILE_INFO.Context */
-  ULONG64 UserContext;
-  /** Event Id */
-  ULONG EventId;
-  /** Directories list. Used by FindFiles */
-  PLIST_ENTRY DirListHead;
-  /** File streams list. Used by FindStreams */
-  PLIST_ENTRY StreamListHead;
   /** Used when dispatching the close once the OpenCount drops to 0 **/
   LPWSTR FileName;
+  /** Event context */
+  PEVENT_CONTEXT EventContext;
 } DOKAN_OPEN_INFO, *PDOKAN_OPEN_INFO;
 
-BOOL DokanStart(PDOKAN_INSTANCE Instance);
+/**
+ * \struct DOKAN_IO_BATCH
+ * \brief Dokan IO batch buffer
+ *
+ * This is used to pull batch of events from the kernel.
+ * 
+ * For each EVENT_CONTEXT that is pulled from the kernel, a DOKAN_IO_EVENT is allocated with its EventContext pointer placed to the IoBatch buffer.
+ * DOKAN_IO_EVENT will be dispatched for being processed by a pool thread (or the main pull thread).
+ * When the event is processed, the DOKAN_IO_EVENT will be freed and the EventContextBatchCount will be decremented.
+ * When it reaches 0, the buffer is free or pushed to the memory pool.
+ */
+typedef struct _DOKAN_IO_BATCH {
+  /** Dokan instance linked to the batch */
+  PDOKAN_INSTANCE DokanInstance;
+  /** Size read from kernel that is hold in EventContext */
+  DWORD NumberOfBytesTransferred;
+  /** Whether it is used by the Main pull thread that wait indefinitely in kernel compared to volatile pool threads */
+  BOOL MainPullThread;
+  /**
+   * Whether this object was allocated from the memory pool.
+   * Large Write events will allocate a specific buffer that will not come from the memory pool.
+   */
+  BOOL PoolAllocated;
+  /**
+   * Number of actual EVENT_CONTEXT stored in EventContext.
+   * This is used as a shared buffer counter that is decremented when an event is processed.
+   * When it reaches 0, the buffer is free or pushed to the memory pool.
+   */
+  LONG EventContextBatchCount;
+  /**
+   * The actual buffer used to pull events from kernel.
+   * It may contain multiple EVENT_CONTEXT depending on what the kernel has to offer right now.
+   * A high activity will generate multiple EVENT_CONTEXT to be batched in a single pull.
+   */
+  EVENT_CONTEXT EventContext[1];
+} DOKAN_IO_BATCH, *PDOKAN_IO_BATCH;
+
+/**
+ * \struct DOKAN_IO_EVENT
+ * \brief Dokan IO Event
+ *
+ * Use to track one of the even pulled by DOKAN_IO_BATCH while it is being processed by the FileSystem.
+ * The EventContext is owned by the DOKAN_IO_BATCH and not this instance.
+ */
+typedef struct _DOKAN_IO_EVENT {
+  /** Dokan instance linked to the event */
+  PDOKAN_INSTANCE DokanInstance;
+  /** Optional open information for the event context */
+  PDOKAN_OPEN_INFO DokanOpenInfo;
+  /**
+   * Optional result of the event to send to the kernel.
+   * Some events like Close() do not have a response.
+   */
+  PEVENT_INFORMATION EventResult;
+  /** Size of the EventResult buffer to send to the kernel */
+  ULONG EventResultSize;
+  /**
+   * Whether if EventResult was allocated from the memory pool.
+   * Large events like FindFiles will allocate a specific buffer that will not come from the memory pool.
+   */
+  BOOL PoolAllocated;
+  /** File information for the event context */
+  DOKAN_FILE_INFO DokanFileInfo;
+  /** The actual event pulled from the kernel. This buffer is not owned by the IoEvent. */
+  PEVENT_CONTEXT EventContext;
+  /**
+   * The io batch that owns the lifetime of the EventContext.
+   * When it is free, the EventContext of this IoEvent is no longer safe to access.
+   */
+  PDOKAN_IO_BATCH IoBatch;
+} DOKAN_IO_EVENT, *PDOKAN_IO_EVENT;
+
+#define IOEVENT_RESULT_BUFFER_SIZE(ioEvent)                                    \
+  ((ioEvent)->EventResultSize >= offsetof(EVENT_INFORMATION, Buffer)           \
+       ? (ioEvent)->EventResultSize - offsetof(EVENT_INFORMATION, Buffer)      \
+       : 0)
+
+
+int DokanStart(_In_ PDOKAN_INSTANCE DokanInstance);
 
 BOOL SendToDevice(LPCWSTR DeviceName, DWORD IoControlCode, PVOID InputBuffer,
                   ULONG InputLength, PVOID OutputBuffer, ULONG OutputLength,
@@ -109,78 +203,42 @@ VOID
 GetRawDeviceName(LPCWSTR DeviceName, LPWSTR DestinationBuffer,
                  rsize_t DestinationBufferSizeInElements);
 
-void ALIGN_ALLOCATION_SIZE(PLARGE_INTEGER size, PDOKAN_OPTIONS DokanOptions);
-
-UINT __stdcall DokanLoop(PVOID Param);
+VOID ALIGN_ALLOCATION_SIZE(PLARGE_INTEGER size, PDOKAN_OPTIONS DokanOptions);
 
 BOOL DokanMount(LPCWSTR MountPoint, LPCWSTR DeviceName,
                 PDOKAN_OPTIONS DokanOptions);
 
 BOOL IsMountPointDriveLetter(LPCWSTR mountPoint);
 
-VOID SendEventInformation(HANDLE Handle, PEVENT_INFORMATION EventInfo,
-                          ULONG EventLength);
+VOID EventCompletion(PDOKAN_IO_EVENT EventInfo);
 
-ULONG DispatchGetEventInformationLength(ULONG bufferSize);
+VOID CreateDispatchCommon(PDOKAN_IO_EVENT IoEvent, ULONG SizeOfEventInfo);
 
-PEVENT_INFORMATION
-DispatchCommon(PEVENT_CONTEXT EventContext, ULONG SizeOfEventInfo,
-               PDOKAN_INSTANCE DokanInstance, PDOKAN_FILE_INFO DokanFileInfo,
-               PDOKAN_OPEN_INFO *DokanOpenInfo);
+VOID DispatchDirectoryInformation(PDOKAN_IO_EVENT IoEvent);
 
-VOID DispatchDirectoryInformation(HANDLE Handle, PEVENT_CONTEXT EventContext,
-                                  PDOKAN_INSTANCE DokanInstance);
+VOID DispatchQueryInformation(PDOKAN_IO_EVENT IoEvent);
 
-VOID DispatchQueryInformation(HANDLE Handle, PEVENT_CONTEXT EventContext,
-                              PDOKAN_INSTANCE DokanInstance);
+VOID DispatchQueryVolumeInformation(PDOKAN_IO_EVENT IoEvent);
 
-VOID DispatchQueryVolumeInformation(HANDLE Handle, PEVENT_CONTEXT EventContext,
-                                    PDOKAN_INSTANCE DokanInstance);
+VOID DispatchSetInformation(PDOKAN_IO_EVENT IoEvent);
 
-VOID DispatchSetInformation(HANDLE Handle, PEVENT_CONTEXT EventContext,
-                            PDOKAN_INSTANCE DokanInstance);
+VOID DispatchRead(PDOKAN_IO_EVENT IoEvent);
 
-VOID DispatchRead(HANDLE Handle, PEVENT_CONTEXT EventContext,
-                  PDOKAN_INSTANCE DokanInstance);
+VOID DispatchWrite(PDOKAN_IO_EVENT IoEvent);
 
-VOID DispatchWrite(HANDLE Handle, PEVENT_CONTEXT EventContext,
-                   PDOKAN_INSTANCE DokanInstance);
+VOID DispatchCreate(PDOKAN_IO_EVENT IoEvent);
 
-VOID DispatchCreate(HANDLE Handle, PEVENT_CONTEXT EventContext,
-                    PDOKAN_INSTANCE DokanInstance);
+VOID DispatchClose(PDOKAN_IO_EVENT IoEvent);
 
-VOID DispatchClose(HANDLE Handle, PEVENT_CONTEXT EventContext,
-                   PDOKAN_INSTANCE DokanInstance);
+VOID DispatchCleanup(PDOKAN_IO_EVENT IoEvent);
 
-VOID DispatchCleanup(HANDLE Handle, PEVENT_CONTEXT EventContext,
-                     PDOKAN_INSTANCE DokanInstance);
+VOID DispatchFlush(PDOKAN_IO_EVENT IoEvent);
 
-VOID DispatchFlush(HANDLE Handle, PEVENT_CONTEXT EventContext,
-                   PDOKAN_INSTANCE DokanInstance);
+VOID DispatchLock(PDOKAN_IO_EVENT IoEvent);
 
-VOID DispatchLock(HANDLE Handle, PEVENT_CONTEXT EventContext,
-                  PDOKAN_INSTANCE DokanInstance);
+VOID DispatchQuerySecurity(PDOKAN_IO_EVENT IoEvent);
 
-VOID DispatchQuerySecurity(HANDLE Handle, PEVENT_CONTEXT EventContext,
-                           PDOKAN_INSTANCE DokanInstance);
-
-VOID DispatchSetSecurity(HANDLE Handle, PEVENT_CONTEXT EventContext,
-                         PDOKAN_INSTANCE DokanInstance);
-
-BOOLEAN
-InstallDriver(SC_HANDLE SchSCManager, LPCWSTR DriverName, LPCWSTR ServiceExe);
-
-BOOLEAN
-RemoveDriver(SC_HANDLE SchSCManager, LPCWSTR DriverName);
-
-BOOLEAN
-StartDriver(SC_HANDLE SchSCManager, LPCWSTR DriverName);
-
-BOOLEAN
-StopDriver(SC_HANDLE SchSCManager, LPCWSTR DriverName);
-
-BOOLEAN
-ManageDriver(LPCWSTR DriverName, LPCWSTR ServiceName, USHORT Function);
+VOID DispatchSetSecurity(PDOKAN_IO_EVENT IoEvent);
 
 BOOL SendReleaseIRP(LPCWSTR DeviceName);
 
@@ -188,33 +246,9 @@ BOOL SendGlobalReleaseIRP(LPCWSTR MountPoint);
 
 VOID CheckFileName(LPWSTR FileName);
 
-VOID ClearFindData(PLIST_ENTRY ListHead);
+VOID ReleaseDokanOpenInfo(PDOKAN_IO_EVENT IoEvent);
 
-VOID ClearFindStreamData(PLIST_ENTRY ListHead);
-
-UINT WINAPI DokanKeepAlive(PVOID Param);
-
-PDOKAN_OPEN_INFO
-GetDokanOpenInfo(PEVENT_CONTEXT EventInfomation, PDOKAN_INSTANCE DokanInstance);
-
-VOID ReleaseDokanOpenInfo(PEVENT_INFORMATION EventInfomation,
-                          PDOKAN_FILE_INFO FileInfo,
-                          PDOKAN_INSTANCE DokanInstance);
-
-/**
- * \brief Unmount a Dokan device from a mount point
- *
- * Same as \ref DokanRemoveMountPoint
- * If Safe is \c TRUE, it will broadcast to all desktops and Shells
- * Safe should not be used during DLL_PROCESS_DETACH
- *
- * \see DokanRemoveMountPoint
- *
- * \param MountPoint Mount point to unmount ("Z", "Z:", "Z:\", "Z:\MyMountPoint").
- * \param Safe Process is not in DLL_PROCESS_DETACH state.
- * \return \c TRUE if device was unmounted or \c FALSE in case of failure or device not found.
- */
-BOOL DokanRemoveMountPointEx(LPCWSTR MountPoint, BOOL Safe);
+VOID DokanNotifyUnmounted(PDOKAN_INSTANCE DokanInstance);
 
 #ifdef __cplusplus
 }

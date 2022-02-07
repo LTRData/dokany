@@ -45,11 +45,13 @@ static NTSTATUS create_main_stream(
     PDOKAN_IO_SECURITY_CONTEXT security_context) {
   // When creating a new a alternated stream, we need to be sure
   // the main stream exist otherwise we create it.
-  auto main_stream_name = memfs_helper::GetFileName(filename, stream_names);
+  auto main_stream_name =
+      memfs_helper::GetFileNameStreamLess(filename, stream_names);
   if (!fs_filenodes->find(main_stream_name)) {
     spdlog::info(L"create_main_stream: we create the maing stream {}", main_stream_name);
-    auto n = fs_filenodes->add(std::make_shared<filenode>(
-        main_stream_name, false, file_attributes_and_flags, security_context));
+    auto n = fs_filenodes->add(std::make_shared<filenode>(main_stream_name, false,
+                                   file_attributes_and_flags, security_context),
+        {});
     if (n != STATUS_SUCCESS) return n;
   }
   return STATUS_SUCCESS;
@@ -110,7 +112,7 @@ memfs_createfile(LPCWSTR filename, PDOKAN_IO_SECURITY_CONTEXT security_context,
 
       auto newfileNode = std::make_shared<filenode>(
           filename_str, true, FILE_ATTRIBUTE_DIRECTORY, security_context);
-      return filenodes->add(newfileNode);
+      return filenodes->add(newfileNode, stream_names);
     }
 
     if (f && !f->is_directory) return STATUS_NOT_A_DIRECTORY;
@@ -187,8 +189,11 @@ memfs_createfile(LPCWSTR filename, PDOKAN_IO_SECURITY_CONTEXT security_context,
           if (n != STATUS_SUCCESS) return n;
         }
 
-        auto n = filenodes->add(std::make_shared<filenode>(
-            filename_str, false, file_attributes_and_flags, security_context));
+        auto n =
+            filenodes->add(std::make_shared<filenode>(filename_str, false,
+                                                      file_attributes_and_flags,
+                                                      security_context),
+                           stream_names);
         if (n != STATUS_SUCCESS) return n;
 
         /*
@@ -199,7 +204,7 @@ memfs_createfile(LPCWSTR filename, PDOKAN_IO_SECURITY_CONTEXT security_context,
         if (f) return STATUS_OBJECT_NAME_COLLISION;
       } break;
       case CREATE_NEW: {
-        spdlog::info(L"CreateFile: {} CREATE_ALWAYS", filename_str);
+        spdlog::info(L"CreateFile: {} CREATE_NEW", filename_str);
         /*
          * Creates a new file, only if it does not already exist.
          */
@@ -214,8 +219,10 @@ memfs_createfile(LPCWSTR filename, PDOKAN_IO_SECURITY_CONTEXT security_context,
           if (n != STATUS_SUCCESS) return n;
         }
 
-        auto n = filenodes->add(std::make_shared<filenode>(
-            filename_str, false, file_attributes_and_flags, security_context));
+        auto n = filenodes->add(std::make_shared<filenode>(filename_str, false,
+                                                      file_attributes_and_flags,
+                                                      security_context),
+                           stream_names);
         if (n != STATUS_SUCCESS) return n;
       } break;
       case OPEN_ALWAYS: {
@@ -227,7 +234,8 @@ memfs_createfile(LPCWSTR filename, PDOKAN_IO_SECURITY_CONTEXT security_context,
         if (!f) {
           auto n = filenodes->add(std::make_shared<filenode>(
               filename_str, false, file_attributes_and_flags,
-              security_context));
+                                 security_context),
+                             stream_names);
           if (n != STATUS_SUCCESS) return n;
         } else {
           if (desiredaccess & FILE_EXECUTE) {
@@ -422,11 +430,12 @@ static NTSTATUS DOKAN_CALLBACK memfs_findfiles(LPCWSTR filename,
   ZeroMemory(&findData, sizeof(WIN32_FIND_DATAW));
   for (const auto& f : files) {
     if (f->main_stream) continue; // Do not list File Streams
-    const auto fileNodeName = f->get_filename();
-    auto fileName = std::filesystem::path(fileNodeName).filename().wstring();
-    if (fileName.length() > MAX_PATH) continue;
-    std::copy(fileName.begin(), fileName.end(), std::begin(findData.cFileName));
-    findData.cFileName[fileName.length()] = '\0';
+    const auto fileNodeName = memfs_helper::GetFileName(f->get_filename());
+    if (fileNodeName.size() > MAX_PATH)
+      continue;
+    std::copy(fileNodeName.begin(), fileNodeName.end(),
+              std::begin(findData.cFileName));
+    findData.cFileName[fileNodeName.length()] = '\0';
     findData.dwFileAttributes = f->attributes;
     memfs_helper::LlongToFileTime(f->times.creation, findData.ftCreationTime);
     memfs_helper::LlongToFileTime(f->times.lastaccess,
@@ -454,15 +463,24 @@ static NTSTATUS DOKAN_CALLBACK memfs_setfileattributes(
                fileattributes);
   if (!f) return STATUS_OBJECT_NAME_NOT_FOUND;
 
-  // No attributes need to be changed
-  if (fileattributes == 0) return STATUS_SUCCESS;
+  // from https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileattributesw
+  DWORD const attributes_allowed_to_set =
+      FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_NORMAL |
+      FILE_ATTRIBUTE_NOT_CONTENT_INDEXED | FILE_ATTRIBUTE_OFFLINE |
+      FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM |
+      FILE_ATTRIBUTE_TEMPORARY;
 
-  // FILE_ATTRIBUTE_NORMAL is override if any other attribute is set
-  if (fileattributes & FILE_ATTRIBUTE_NORMAL &&
-      (fileattributes & (fileattributes - 1)))
-    fileattributes &= ~FILE_ATTRIBUTE_NORMAL;
+  fileattributes &= attributes_allowed_to_set;
 
-  f->attributes = fileattributes;
+  DWORD new_file_attributes =
+      (f->attributes & ~attributes_allowed_to_set) | fileattributes;
+
+  // FILE_ATTRIBUTE_NORMAL is overriden if any other attribute is set
+  if ((new_file_attributes & FILE_ATTRIBUTE_NORMAL) &&
+      (new_file_attributes & ~static_cast<DWORD>(FILE_ATTRIBUTE_NORMAL)))
+    new_file_attributes &= ~static_cast<DWORD>(FILE_ATTRIBUTE_NORMAL);
+
+  f->attributes = new_file_attributes;
   return STATUS_SUCCESS;
 }
 
@@ -532,7 +550,8 @@ static NTSTATUS DOKAN_CALLBACK memfs_movefile(LPCWSTR filename,
     // We removed the stream type and now need to concat the filename and the
     // new stream name
     auto stream_names = memfs_helper::GetStreamNames(filename_str);
-    new_filename_str = memfs_helper::GetFileName(filename, stream_names) +
+    new_filename_str =
+        memfs_helper::GetFileNameStreamLess(filename, stream_names) +
                        L":" + new_stream_names.second;
   }
   spdlog::info(L"MoveFile: after {} to {}", filename_str, new_filename_str);
@@ -610,8 +629,12 @@ static NTSTATUS DOKAN_CALLBACK memfs_getvolumeinformation(
 }
 
 static NTSTATUS DOKAN_CALLBACK
-memfs_mounted(PDOKAN_FILE_INFO /*dokanfileinfo*/) {
-  spdlog::info(L"Mounted");
+memfs_mounted(LPCWSTR MountPoint, PDOKAN_FILE_INFO dokanfileinfo) {
+  spdlog::info(L"Mounted as {}", MountPoint);
+  WCHAR *mount_point =
+      (reinterpret_cast<memfs *>(dokanfileinfo->DokanOptions->GlobalContext))
+          ->mount_point;
+  wcscpy_s(mount_point, sizeof(WCHAR) * MAX_PATH, MountPoint);
   return STATUS_SUCCESS;
 }
 
@@ -712,13 +735,14 @@ static NTSTATUS DOKAN_CALLBACK memfs_setfilesecurity(
 
 static NTSTATUS DOKAN_CALLBACK
 memfs_findstreams(LPCWSTR filename, PFillFindStreamData fill_findstreamdata,
-                  PDOKAN_FILE_INFO dokanfileinfo) {
+                  PVOID findstreamcontext, PDOKAN_FILE_INFO dokanfileinfo) {
   auto filenodes = GET_FS_INSTANCE;
   auto filename_str = std::wstring(filename);
   spdlog::info(L"FindStreams: {}", filename_str);
   auto f = filenodes->find(filename_str);
 
-  if (!f) return STATUS_OBJECT_NAME_NOT_FOUND;
+  if (!f)
+    return STATUS_OBJECT_NAME_NOT_FOUND;
 
   auto streams = f->get_streams();
 
@@ -731,9 +755,12 @@ memfs_findstreams(LPCWSTR filename, PFillFindStreamData fill_findstreamdata,
               memfs_helper::DataStreamNameStr.end(),
               std::begin(stream_data.cStreamName) + 1);
     stream_data.cStreamName[0] = ':';
-    stream_data.cStreamName[memfs_helper::DataStreamNameStr.length() + 1] = L'\0';
+    stream_data.cStreamName[memfs_helper::DataStreamNameStr.length() + 1] =
+        L'\0';
     stream_data.StreamSize.QuadPart = f->get_filesize();
-    fill_findstreamdata(&stream_data, dokanfileinfo);
+    if (!fill_findstreamdata(&stream_data, findstreamcontext)) {
+      return STATUS_BUFFER_OVERFLOW;
+    }
   } else if (streams.empty()) {
     // The node is a directory without any alternate streams
     return STATUS_END_OF_FILE;
@@ -741,27 +768,30 @@ memfs_findstreams(LPCWSTR filename, PFillFindStreamData fill_findstreamdata,
 
   // Add the alternated stream attached
   // for \foo:bar we need to return in the form of bar:$DATA
-  for (const auto& stream : streams) {
+  for (const auto &stream : streams) {
     auto stream_names = memfs_helper::GetStreamNames(stream.first);
-    if (stream_names.second.length() + memfs_helper::DataStreamNameStr.length() +
-            1 >
+    if (stream_names.second.length() +
+            memfs_helper::DataStreamNameStr.length() + 1 >
         sizeof(stream_data.cStreamName))
       continue;
     // Copy the filename foo
     std::copy(stream_names.second.begin(), stream_names.second.end(),
               std::begin(stream_data.cStreamName) + 1);
     // Concat :$DATA
-    std::copy(
-        memfs_helper::DataStreamNameStr.begin(),
-        memfs_helper::DataStreamNameStr.end(),
-        std::begin(stream_data.cStreamName) + stream_names.second.length() + 1);
+    std::copy(memfs_helper::DataStreamNameStr.begin(),
+              memfs_helper::DataStreamNameStr.end(),
+              std::begin(stream_data.cStreamName) +
+                  stream_names.second.length() + 1);
     stream_data.cStreamName[0] = ':';
     stream_data.cStreamName[stream_names.second.length() +
-                            memfs_helper::DataStreamNameStr.length() + 1] = L'\0';
+                            memfs_helper::DataStreamNameStr.length() + 1] =
+        L'\0';
     stream_data.StreamSize.QuadPart = stream.second->get_filesize();
     spdlog::info(L"FindStreams: {} StreamName: {} Size: {:x}", filename_str,
                  stream_names.second, stream_data.StreamSize.QuadPart);
-    fill_findstreamdata(&stream_data, dokanfileinfo);
+    if (!fill_findstreamdata(&stream_data, findstreamcontext)) {
+      return STATUS_BUFFER_OVERFLOW;
+    }
   }
   return STATUS_SUCCESS;
 }

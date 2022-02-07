@@ -504,7 +504,7 @@ BOOL EnableTokenPrivilege(LPCTSTR lpszSystemName, BOOL bEnable) {
   return FALSE;
 }
 
-void DokanBroadcastLink(WCHAR cLetter, BOOL bRemoved, BOOL safe) {
+VOID DokanBroadcastLink(WCHAR cLetter, BOOL bRemoved) {
   DWORD receipients;
   DWORD device_event;
   DEV_BROADCAST_VOLUME params;
@@ -518,7 +518,7 @@ void DokanBroadcastLink(WCHAR cLetter, BOOL bRemoved, BOOL safe) {
 
   receipients = BSM_APPLICATIONS;
   // Unsafe to call Advapi32.dll during DLL_PROCESS_DETACH
-  if (safe && EnableTokenPrivilege(SE_TCB_NAME, TRUE)) {
+  if (EnableTokenPrivilege(SE_TCB_NAME, TRUE)) {
     receipients |= BSM_ALLDESKTOPS;
   }
 
@@ -539,12 +539,9 @@ void DokanBroadcastLink(WCHAR cLetter, BOOL bRemoved, BOOL safe) {
              GetLastError());
   }
 
-  // Unsafe to call ole32.dll during DLL_PROCESS_DETACH
-  if (safe) {
-    drive[0] = towupper(cLetter);
-    wEventId = bRemoved ? SHCNE_DRIVEREMOVED : SHCNE_DRIVEADD;
-    SHChangeNotify(wEventId, SHCNF_PATH, drive, NULL);
-  }
+  drive[0] = towupper(cLetter);
+  wEventId = bRemoved ? SHCNE_DRIVEREMOVED : SHCNE_DRIVEADD;
+  SHChangeNotify(wEventId, SHCNF_PATH, drive, NULL);
 }
 
 BOOL DokanMount(LPCWSTR MountPoint, LPCWSTR DeviceName,
@@ -559,43 +556,62 @@ BOOL DokanMount(LPCWSTR MountPoint, LPCWSTR DeviceName,
       return CreateMountPoint(MountPoint, DeviceName);
     } else {
       // Notify applications / explorer
-      DokanBroadcastLink(MountPoint[0], FALSE, TRUE);
+      DokanBroadcastLink(MountPoint[0], FALSE);
     }
   }
   return TRUE;
 }
 
-BOOL DokanRemoveMountPointEx(LPCWSTR MountPoint, BOOL Safe) {
+void GenerateUnmountPoint(LPCWSTR MountPoint, WCHAR *Result,
+                          size_t ResultMaxChars) {
+  size_t length = wcslen(MountPoint);
+  if (IsMountPointDriveLetter(MountPoint)) {
+    wcscpy_s(Result, ResultMaxChars, L"C:");
+    Result[0] = MountPoint[0];
+  } else {
+    wcscpy_s(Result, ResultMaxChars, MountPoint);
+    if (Result[length - 1] == L'\\') {
+      Result[length - 1] = L'\0';
+    }
+  }
+}
+
+BOOL DOKANAPI DokanRemoveMountPoint(LPCWSTR MountPoint) {
   if (MountPoint != NULL) {
     size_t length = wcslen(MountPoint);
     if (length > 0) {
-      WCHAR mountPoint[MAX_PATH];
-
-      if (IsMountPointDriveLetter(MountPoint)) {
-        wcscpy_s(mountPoint, sizeof(mountPoint) / sizeof(WCHAR), L"C:");
-        mountPoint[0] = MountPoint[0];
-      } else {
-        wcscpy_s(mountPoint, sizeof(mountPoint) / sizeof(WCHAR), MountPoint);
-        if (mountPoint[length - 1] == L'\\') {
-          mountPoint[length - 1] = L'\0';
-        }
-      }
-
-      if (SendGlobalReleaseIRP(mountPoint)) {
-        if (!IsMountPointDriveLetter(MountPoint)) {
-          wcscat_s(mountPoint, sizeof(mountPoint) / sizeof(WCHAR), L"\\");
-          return DeleteMountPoint(mountPoint);
-        } else {
-          // Notify applications / explorer
-          DokanBroadcastLink(MountPoint[0], TRUE, Safe);
-          return TRUE;
-        }
-      }
+      WCHAR unmountPoint[MAX_PATH];
+      GenerateUnmountPoint(MountPoint, unmountPoint, ARRAYSIZE(unmountPoint));
+      return SendGlobalReleaseIRP(unmountPoint) ? TRUE : FALSE;
     }
   }
   return FALSE;
 }
 
-BOOL DOKANAPI DokanRemoveMountPoint(LPCWSTR MountPoint) {
-  return DokanRemoveMountPointEx(MountPoint, TRUE);
+VOID DokanNotifyUnmounted(PDOKAN_INSTANCE DokanInstance) {
+  WCHAR unmountPoint[MAX_PATH];
+  GenerateUnmountPoint(DokanInstance->MountPoint, unmountPoint,
+                       ARRAYSIZE(unmountPoint));
+  if (!IsMountPointDriveLetter(DokanInstance->MountPoint)) {
+    size_t length = wcslen(unmountPoint);
+    if (!(DokanInstance->DokanOptions->Options & DOKAN_OPTION_MOUNT_MANAGER) &&
+        length + 1 < MAX_PATH) {
+      unmountPoint[length] = L'\\';
+      unmountPoint[length + 1] = L'\0';
+      // Required to remove reparse point (could also be done through
+      // FSCTL_DELETE_REPARSE_POINT with DeleteMountPoint function)
+      DeleteVolumeMountPoint(unmountPoint);
+    }
+  } else {
+    // Notify applications / explorer
+    DokanBroadcastLink(DokanInstance->MountPoint[0], TRUE);
+  }
+
+  if (DokanInstance->DokanOperations->Unmounted) {
+    DOKAN_FILE_INFO fileInfo;
+    RtlZeroMemory(&fileInfo, sizeof(DOKAN_FILE_INFO));
+    fileInfo.DokanOptions = DokanInstance->DokanOptions;
+    // Ignore return value
+    DokanInstance->DokanOperations->Unmounted(&fileInfo);
+  }
 }

@@ -30,14 +30,16 @@ THE SOFTWARE.
 #include <spdlog/spdlog.h>
 
 namespace memfs {
-void memfs::run() {
+void memfs::start() {
   fs_filenodes = std::make_unique<::memfs::fs_filenodes>();
 
   DOKAN_OPTIONS dokan_options;
   ZeroMemory(&dokan_options, sizeof(DOKAN_OPTIONS));
   dokan_options.Version = DOKAN_VERSION;
-  dokan_options.Options = DOKAN_OPTION_ALT_STREAM | DOKAN_OPTION_CASE_SENSITIVE;
+  dokan_options.Options = DOKAN_OPTION_ALT_STREAM |
+                          DOKAN_OPTION_CASE_SENSITIVE;
   dokan_options.MountPoint = mount_point;
+  dokan_options.SingleThread = single_thread;
   if (debug_log) {
     dokan_options.Options |= DOKAN_OPTION_STDERR | DOKAN_OPTION_DEBUG;
     if (dispatch_driver_logs) {
@@ -49,9 +51,7 @@ void memfs::run() {
   // Mount type
   if (network_drive) {
     dokan_options.Options |= DOKAN_OPTION_NETWORK;
-    if (unc_name[0]) {
-      dokan_options.UNCName = unc_name;
-    }
+    dokan_options.UNCName = unc_name;
     if (enable_network_unmount) {
       dokan_options.Options |= DOKAN_OPTION_ENABLE_UNMOUNT_NETWORK_DRIVE;
     }
@@ -66,11 +66,11 @@ void memfs::run() {
     dokan_options.Options |= DOKAN_OPTION_CURRENT_SESSION;
   }
   
-  dokan_options.ThreadCount = thread_number;
   dokan_options.Timeout = timeout;
-  dokan_options.GlobalContext = reinterpret_cast<ULONG64>(fs_filenodes.get());
+  dokan_options.GlobalContext = reinterpret_cast<ULONG64>(this);
 
-  NTSTATUS status = DokanMain(&dokan_options, &memfs_operations);
+  NTSTATUS status =
+      DokanCreateFileSystem(&dokan_options, &memfs_operations, &instance);
   switch (status) {
     case DOKAN_SUCCESS:
       break;
@@ -94,5 +94,8 @@ void memfs::run() {
   }
 }
 
-memfs::~memfs() { DokanRemoveMountPoint(mount_point); }
-}  // namespace memfs
+void memfs::wait() { DokanWaitForFileSystemClosed(instance, INFINITE); }
+
+void memfs::stop() { DokanCloseHandle(instance); }
+
+} // namespace memfs

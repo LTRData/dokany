@@ -3,6 +3,101 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](http://keepachangelog.com/) and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## [2.0.2.1000] - 2021-02-06
+
+### Fixed
+- Library - Fix `DokanResetTimeout` DokanFileInfo usage.
+- Library - Correctly set PullEventTimeoutMs value.
+- Kernel - Fix notify queue timeout value and timeout detection.
+- Memfs - Fix `SetFileAttributes` behavior.
+- Library - Fix incorrect lock used for DokanOpenInfo `OpenCount` increments.
+
+### Changed
+- Library - Use multiple main pull thread (4 instead of 1) to avoid deadlock during low activity.
+
+## [2.0.1.2000] - 2021-01-28
+
+### Fixed
+- Installer - Set new BundleUpgradeCode for v2.
+- Kernel - Lock Fcb during setFileInfo notify report change
+
+## [2.0.1.1000] - 2021-01-23
+
+### Added
+- Kernel - Use the Rtl API to store DokanFCB in a Adelson-Velsky/Landis(AVL) table
+
+### Fixed
+- Kernel - Fix possible `PullEvents` infinite loop.
+- Kernel - Fix crash when v2 and v1 are installed.
+- Kernel - Make `RemoveSessionDevices` thread safe.
+- Library - Fix `OpenRequestToken` crash when called outside `CreateFile`.
+- Kernel - Fix subfolder property when using mount manager.
+
+### Changed
+- Installer - Allow installation side to side with 1.x.x.
+- Library / Kernel - Enforce UNC usage with network drive option.
+- Memfs - Update mount point in memfs after mount in case it changes.
+- Library - Silence expected failures during unmount and make `DeleteDokanInstance` safer.
+- Memfs - Use the new mount async API.
+- Kernel - Release `NotifyEvent` memory on unmount.
+- Kernel - Use IRP buffer fct for `GetMountPointList`.
+- Kernel - Cleanup `SetInformation` completion and remove `DokanCCB::ERESOURCE`.
+
+## [2.0.0.2000] - 2021-01-01
+
+### Fixed
+- Library - Missing new 2.0.0 API export.
+- Library - Move `DOKAN_FILE_INFO.ProcessingContext` offset in struct to avoid padding issues.
+
+## [2.0.0.1000] - 2021-12-30
+
+See [here](https://github.com/dokan-dev/dokany/wiki/Update-Dokan-1.1.0-application-to-Dokany-2.0.0) how to migrate an existing > 1.1.0 filesystem to 2.0.0.
+
+### Added
+- Kernel / Library - Introduce Thread & Memory pool to process and pull events. This is highly based on #307 but without the async logic. The reason is to avoid using the kernel `NotificationLoop` that was dispatching requests to workers (userland thread) sequentially since wake up workers have a high cost of thread context switch.
+The previous logic is nice when you want workers to be async (like #307) but as we have threads (and now even a thread poll) dedicated to pull and process events, there is no issue to make them synchronously wait in kernel for new events and directly take them from the pending request list.
+The library will start with a single main thread that pulls events by batch and dispatches them to the thread pool but keeps the last one to be executed (or the only one) to be executed on the same thread. Each thread waken will do the same and pull new events at the same time. If none is returned, the thread goes back to sleep and otherwise does the same as the main thread (dispatch and process...etc). Only the main thread waits indefinitely for new events while others wait 100ms in the kernel before returning back to userland.Batching events, thread and memory pool offers a great flexibility of resources especially on heavy load.Thousands of lines of code were changed in the library (thanks again to @Corillian contribution of full rewrite) but the public API hasn't changed much.After running multiple benchmarks against `memfs`, sequential requests are about 10-35% faster but in the real world with the thread pool the perf are way above. @Corillian full rewrite of `FindFiles` actually improved an astonishing +100-250%...crazy.
+- Library - `DokanCreateFileSystem` creates a filesystem like `DokanMain` but is async and will directly return when mount happens. `DokanWaitForFileSystemClosed` will wait until the filesystem is unmount and `DokanIsFileSystemRunning` can be used to check if it is still running. `DokanCloseHandle` will trigger an unmount and wait for it to be completed.
+- Library - `DokanInit` and `DokanShutdown` are two new API that need to be called before creating filesystems and when dokan is no longer needed. They allocate internal mandatory dokan resources.  
+- Kernel / Library - A Volume Security descriptor can now be assigned to `DOKAN_OPTIONS.VolumeSecurityDescriptor` to personalize the volume security permissions.
+- Kernel - `FSCTL_EVENT_PROCESS_N_PULL` replace `IOCTL_EVENT_WAIT` and `IOCTL_EVENT_INFO` to process a possible answer and pull new events.
+- Kernel - If Mount manager is enabled and the drive letter provided is busy, the drive will try to release the drive letter if it owns it. This can be useful during fast mount & unmount. If the drive letter is still busy after that, Mount manager is asked to assign a new one for us and will be provided to userland through `EVENT_DRIVER_INFO.ActualDriveLetter`.
+- Library - `DOKAN_OPERATIONS.Mounted` now has a `MountPoint` param that will return the actual mount point used (see above on why it can be different).
+- Library - `DOKAN_FILE_INFO.ProcessingContext` is a new Dokan reserved field currently used to pass information during a `FindFiles`.
+
+### Changed
+- Kernel - Major API has moved to version 2. This version is not compatible with dokan version 1.x.x.
+- Kernel - Remove legacy Keepalive logic.
+- Kernel - Remove legacy IOCTL.
+- Kernel - Enable `DOKAN_EVENT_ENABLE_FCB_GC` by default and the interval can be set from userland (currently not public).
+- Memfs - Unmount drive when `Ctrl + C` is used.
+- Kernel - Move back `DOKAN_CONTROL` to the private kernel header to avoid sharing kernel variables to userland. Instead, `DOKAN_MOUNT_POINT_INFO` was created for this purpose and taken over in the different userland API that was using `DOKAN_CONTROL`.
+- Library - `DOKAN_OPTION_*` values were reordered and reassigned.
+- Library - `DOKAN_OPTIONS.ThreadCount` was replaced by `DOKAN_OPTIONS.SingleThread` since the library now uses a thread pool that allocats workers depending on workload and the available resources.
+- Library - `PFillFindStreamData` now returns `FALSE` if the buffer is full, otherwise `TRUE`. It also requires to pass the `FindStreamContext` argument received during `FindStreams` instead of the previous `DokanFileInfo`.
+- Library - `DokanGetMountPointList` and `DokanReleaseMountPointList` use the new `DOKAN_MOUNT_POINT_INFO` instead of the now private `DOKAN_CONTROL`.
+- Library - All `DokanNotify*` functions now require the `DOKAN_HANDLE` created by `DokanCreateFileSystem`.
+- Memfs - Pass already processed `stream_names` when adding the node.
+
+### Fixed
+- Library - `DOKAN_EVENT_DISPATCH_DRIVER_LOGS` is now usable to retrieve Kernel logs even on release build due to the batching events now enabled by default.
+
+## [1.5.1.1000] - 2021-11-26
+### Added
+- Mirror - Add an option to personalize the volume name.
+
+### Changed
+- Installer - Add Debug drivers in cab for submission (Driver signature).
+- Dokanctl - Remove non available unmount by id option.
+
+### Fixed
+- Memfs - Invalid create disposition log type.
+- FUSE - Use `stbuf` in `readdir` callback.
+- Kernel - Fix relative rename with Volume device as `RootDirectory` BSOD.
+- Kernel - Return a mount failure and cleanup the devices when the driver fails to set the mount point folder reparse point.
+- Kernel - Reset top-level IRP when creating / deleting reparse points.
+- Kernel - Delete device on `InsertMountEntry` failure.
+
 ## [1.5.0.3000] - 2021-05-31
 ### Changed
 - Installer - Add Win7 KB4474419 requirements (replace previous KB3033929).
@@ -533,6 +628,12 @@ Latest Dokan version from Hiroki Asakawa.
  [http://dokan-dev.net/en]( http://web.archive.org/web/20150419082954/http://dokan-dev.net/en/)
 
 
+[2.0.2.1000]: https://github.com/dokan-dev/dokany/compare/v2.0.1.2000...v2.0.2.1000
+[2.0.1.2000]: https://github.com/dokan-dev/dokany/compare/v2.0.1.1000...v2.0.1.2000
+[2.0.1.1000]: https://github.com/dokan-dev/dokany/compare/v2.0.0.2000...v2.0.1.1000
+[2.0.0.2000]: https://github.com/dokan-dev/dokany/compare/v2.0.0.1000...v2.0.0.2000
+[2.0.0.1000]: https://github.com/dokan-dev/dokany/compare/v1.5.1.1000...v2.0.0.1000
+[1.5.1.1000]: https://github.com/dokan-dev/dokany/compare/v1.5.0.3000...v1.5.1.1000
 [1.5.0.3000]: https://github.com/dokan-dev/dokany/compare/v1.5.0.2000...v1.5.0.3000
 [1.5.0.2000]: https://github.com/dokan-dev/dokany/compare/v1.5.0.1000...v1.5.0.2000
 [1.5.0.1000]: https://github.com/dokan-dev/dokany/compare/v1.4.1.1000...v1.5.0.1000

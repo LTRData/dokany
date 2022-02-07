@@ -1,5 +1,5 @@
 
-LIBRARY	dokan1
+LIBRARY	dokan2
 
 EXPORTS
 
@@ -27,3 +27,9 @@ DokanNotifyDelete
 DokanNotifyUpdate
 DokanNotifyXAttrUpdate
 DokanNotifyRename
+DokanInit
+DokanShutdown
+DokanCreateFileSystem
+DokanIsFileSystemRunning
+DokanWaitForFileSystemClosed
+DokanCloseHandle

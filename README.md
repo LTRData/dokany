@@ -2,7 +2,7 @@
 [![Github All Releases](https://img.shields.io/github/downloads/dokan-dev/dokany/total.svg)](https://github.com/dokan-dev/dokany/releases)
 [![Build status](https://ci.appveyor.com/api/projects/status/4tpt4v8btyahh3le/branch/master?svg=true)](https://ci.appveyor.com/project/Maxhy/dokany/branch/master)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=dokany&metric=alert_status)](https://sonarcloud.io/dashboard?id=dokany)
-[![Codacy Badge](https://api.codacy.com/project/badge/Grade/43afb600ca75462e94d9484c32090135)](https://www.codacy.com/app/Liryna/dokany?utm_source=github.com&amp;utm_medium=referral&amp;utm_content=dokan-dev/dokany&amp;utm_campaign=Badge_Grade)
+[![Codacy Badge](https://app.codacy.com/project/badge/Grade/5c2ecf8d8f734437beb795dbe5aaa918)](https://www.codacy.com/gh/dokan-dev/dokany/dashboard?utm_source=github.com&amp;utm_medium=referral&amp;utm_content=dokan-dev/dokany&amp;utm_campaign=Badge_Grade)
 [![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/1234/badge)](https://bestpractices.coreinfrastructure.org/projects/1234)
 [![FOSSA Status](https://app.fossa.io/api/projects/git%2Bgithub.com%2Fdokan-dev%2Fdokany.svg?type=shield)](https://app.fossa.io/projects/git%2Bgithub.com%2Fdokan-dev%2Fdokany?ref=badge_shield)
 |
@@ -32,7 +32,19 @@ Since version 0.8.0, dokany broke compatibility with the dokan API. See
 [Choose a version](https://github.com/dokan-dev/dokany/wiki/Installation#choose-a-version)
 for more information.
 
-**Signed x86 / x64 / ARM / ARM64 drivers** are provided at each release.
+The API has then again changed over time in [1.1.0](https://github.com/dokan-dev/dokany/wiki/Update-Dokan-1.0.0-application-to-Dokany-1.1.0) and [2.0.0](https://github.com/dokan-dev/dokany/wiki/Update-Dokan-1.1.0-application-to-Dokany-2.0.0).
+
+## Benchmark v1.5.1.1000 vs v2.0.1.2000
+A benchmark that is testing multiple scenarios repeaditly and sequentially was run 5 times against the `memfs` sample of v1.5.1.1000 and v2.0.1.2000 in an idle environment to precise results.
+The detail results can be seen in this spreadsheet [here](https://docs.google.com/spreadsheets/d/1zdJ6fmP_sqUGCM7SLtTle9N3JLyBOEAMRlwDLfUqm4Q/edit?usp=sharing).
+As better threading and memory poll were added in v2, it is expected that concurrent scenarios (like those tests) would be even more highly improved.
+
+A sample of the results:
+```
+Create New      |  +13.55% | List          |  +60.69% | GetAttributes |  +48.78% | Read  | +16-28% |
+Open/Overwrite  | +153.41% | ListExactFile | +131.91% | SetAttributes | +120.91% | Write |  +2-24% |
+RandomOpenClose | +173.05% |               |          | Delete        |  +90.83% |       |         |
+```
 
 ## Licensing
 Dokan contains LGPL and MIT licensed programs.
@@ -54,13 +66,15 @@ You can obtain source files from https://dokan-dev.github.io
 ## Environment
 Dokan works on
  * Windows Server 2019 / 2016 / 2012 (R2) / 2008 R2 SP1
- * Windows 10 / 8.1 / 8 / 7 SP1
+ * Windows 11 / 10 / 8.1 / 8 / 7 SP1
  
 Platform
  * x86
  * x64
  * ARM
  * ARM64
+
+**Signed Release and Debug drivers** are provided at each release for all platforms.
 
 ## How it works
 Dokan library contains a user mode DLL (dokan1.dll) and a kernel mode file

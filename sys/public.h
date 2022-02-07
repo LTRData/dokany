@@ -24,70 +24,41 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #define PUBLIC_H_
 
 #ifndef DOKAN_MAJOR_API_VERSION
-#define DOKAN_MAJOR_API_VERSION L"1"
+#define DOKAN_MAJOR_API_VERSION L"2"
 #include <minwindef.h>
 #endif
 
 #define DOKAN_DRIVER_VERSION 0x0000190
 
 #define EVENT_CONTEXT_MAX_SIZE (1024 * 32)
+// This is arbitrary. There isn't really an absolute max, but we marshal it in
+// a fixed-size buffer.
+#define VOLUME_SECURITY_DESCRIPTOR_MAX_SIZE (1024 * 16)
 
-#define IOCTL_GET_VERSION                                                      \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_GET_VERSION \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define IOCTL_SET_DEBUG_MODE                                                   \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_SET_DEBUG_MODE \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define IOCTL_EVENT_WAIT                                                       \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define FSCTL_EVENT_WAIT \
-  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
-
-#define IOCTL_EVENT_INFO                                                       \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define FSCTL_EVENT_INFO \
-  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
-
-#define IOCTL_EVENT_RELEASE                                                    \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_EVENT_RELEASE \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define IOCTL_EVENT_START                                                      \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x805, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_EVENT_START \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x805, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define IOCTL_EVENT_WRITE                                                      \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x806, METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
 #define FSCTL_EVENT_WRITE \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x806, METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
 
-#define IOCTL_KEEPALIVE                                                        \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x809, METHOD_NEITHER, FILE_ANY_ACCESS)
-// No IOCTL version as this is now deprecated
-
-#define IOCTL_RESET_TIMEOUT                                                    \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80B, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_RESET_TIMEOUT \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x80B, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define IOCTL_GET_ACCESS_TOKEN                                                 \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80C, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_GET_ACCESS_TOKEN \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x80C, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define IOCTL_EVENT_MOUNTPOINT_LIST                                            \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80D, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_EVENT_MOUNTPOINT_LIST \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x80D, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#define IOCTL_MOUNTPOINT_CLEANUP                                               \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80E, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_MOUNTPOINT_CLEANUP                                               \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x80E, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
@@ -102,10 +73,11 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 
 // DeviceIoControl code to retrieve the VOLUME_METRICS struct for the targeted
 // volume.
-#define IOCTL_GET_VOLUME_METRICS                                               \
-  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x811, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_GET_VOLUME_METRICS \
   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x811, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+#define FSCTL_EVENT_PROCESS_N_PULL                                                     \
+  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x812, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #define DRIVER_FUNC_INSTALL 0x01
 #define DRIVER_FUNC_REMOVE 0x02
@@ -131,7 +103,8 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #define DOKAN_WRITE_TO_END_OF_FILE 128
 #define DOKAN_NOCACHE 256
 #define DOKAN_RETRY_CREATE 512
-#define DOKAN_FILE_CHANGE_LAST_WRITE 1024
+#define DOKAN_EVER_USED_IN_NOTIFY_LIST 1024
+#define DOKAN_FILE_CHANGE_LAST_WRITE 2048
 
 // used in DOKAN_START->DeviceType
 #define DOKAN_DISK_FILE_SYSTEM 0
@@ -381,6 +354,9 @@ typedef struct _VOLUME_METRICS {
 #define WRITE_MAX_SIZE                                                         \
   (EVENT_CONTEXT_MAX_SIZE - sizeof(EVENT_CONTEXT) - 256 * sizeof(WCHAR))
 
+#define DOKAN_EVENT_INFO_MIN_BUFFER_SIZE 8
+#define DOKAN_EVENT_INFO_DEFAULT_BUFFER_SIZE (1024 * 4)
+
 typedef struct _EVENT_INFORMATION {
   ULONG SerialNumber;
   NTSTATUS Status;
@@ -411,9 +387,15 @@ typedef struct _EVENT_INFORMATION {
   } Operation;
   ULONG64 Context;
   ULONG BufferLength;
-  UCHAR Buffer[8];
-
+  ULONG PullEventTimeoutMs;
+  UCHAR Buffer[DOKAN_EVENT_INFO_MIN_BUFFER_SIZE];
 } EVENT_INFORMATION, *PEVENT_INFORMATION;
+
+// By default we pool EVENT_INFORMATION objects with a 4k buffer (1 page) as most read/writes are this size
+// or smaller
+#define DOKAN_EVENT_INFO_DEFAULT_SIZE                                          \
+  (FIELD_OFFSET(EVENT_INFORMATION, Buffer) +                                   \
+   DOKAN_EVENT_INFO_DEFAULT_BUFFER_SIZE)
 
 // Dokan mount options
 #define DOKAN_EVENT_ALTERNATIVE_STREAM_ON                           1
@@ -422,8 +404,6 @@ typedef struct _EVENT_INFORMATION {
 #define DOKAN_EVENT_MOUNT_MANAGER                                   (1 << 3)
 #define DOKAN_EVENT_CURRENT_SESSION                                 (1 << 4)
 #define DOKAN_EVENT_FILELOCK_USER_MODE                              (1 << 5)
-// No longer used option (1 << 6)
-#define DOKAN_EVENT_ENABLE_FCB_GC                                   (1 << 7)
 // CaseSenitive FileName: NTFS can look to be case-insensitive
 // but in some situation it can also be case-sensitive :
 // * NTFS keep the filename casing used during Create internally.
@@ -434,17 +414,51 @@ typedef struct _EVENT_INFORMATION {
 //   case-sensitive / insensitive, even if the device tags says otherwise.
 // Dokan choose to support case-sensitive or case-insensitive filesystem
 // but not those NTFS specific scenarios.
-#define DOKAN_EVENT_CASE_SENSITIVE                                  (1 << 8)
+#define DOKAN_EVENT_CASE_SENSITIVE                                  (1 << 6)
 // Enables unmounting of network drives via file explorer
-#define DOKAN_EVENT_ENABLE_NETWORK_UNMOUNT                          (1 << 9)
-#define DOKAN_EVENT_DISPATCH_DRIVER_LOGS                            (1 << 10)
+#define DOKAN_EVENT_ENABLE_NETWORK_UNMOUNT                          (1 << 7)
+#define DOKAN_EVENT_DISPATCH_DRIVER_LOGS                            (1 << 8)
+#define DOKAN_EVENT_ALLOW_IPC_BATCHING                              (1 << 9)
+#define DOKAN_EVENT_DRIVE_LETTER_IN_USE                             (1 << 10)
+
+// Non-exclusive bits that can be set in EVENT_DRIVER_INFO.Flags for the driver
+// to send back extra info about what happened during a mount attempt, whether
+// or not it succeeded.
+
+// The volume arrival notification did not trigger mounting as expected, so an
+// explicit request was made to the mount manager.
+#define DOKAN_DRIVER_INFO_MOUNT_FORCED 1
+
+// Dokan did not specify a preferred drive letter in response to the suggested
+// link name query from the mount manager. This happens if we know the preferred
+// drive letter is in use, and want the mount manager to select one.
+#define DOKAN_DRIVER_INFO_AUTO_ASSIGN_REQUESTED 2
+
+// Dokan unmounted and then reused the preferred drive letter, because it was
+// determined to be another dokan drive owned by the same Windows user.
+#define DOKAN_DRIVER_INFO_OLD_DRIVE_UNMOUNTED 4
+
+// Dokan determined that the preferred drive letter was in use by a dokan drive
+// owned by a different Windows user. If this is set, then
+// DOKAN_DRIVER_INFO_AUTO_ASSIGNED is also set.
+#define DOKAN_DRIVER_INFO_OLD_DRIVE_LEFT_MOUNTED 8
+
+// The dokan driver is returning a mount response to the DLL before the mount
+// manager has actually assigned a drive letter. We are not sure if this ever
+// happens; if so, it should be very rare.
+#define DOKAN_DRIVER_INFO_NO_MOUNT_POINT_ASSIGNED 16
+
+// Dokan failed to set the reparse point for the mount point folder provided.
+#define DOKAN_DRIVER_INFO_SET_REPARSE_POINT_FAILED 32
 
 typedef struct _EVENT_DRIVER_INFO {
   ULONG DriverVersion;
   ULONG Status;
+  ULONG Flags;
   ULONG DeviceNumber;
   ULONG MountId;
   WCHAR DeviceName[64];
+  WCHAR ActualDriveLetter;
 } EVENT_DRIVER_INFO, *PEVENT_DRIVER_INFO;
 
 typedef struct _EVENT_START {
@@ -454,6 +468,9 @@ typedef struct _EVENT_START {
   WCHAR MountPoint[260];
   WCHAR UNCName[64];
   ULONG IrpTimeout;
+  ULONG FcbGarbageCollectionIntervalMs;
+  ULONG VolumeSecurityDescriptorLength;
+  CHAR VolumeSecurityDescriptor[VOLUME_SECURITY_DESCRIPTOR_MAX_SIZE];
 } EVENT_START, *PEVENT_START;
 
 #ifdef _MSC_VER
@@ -483,10 +500,10 @@ typedef struct _DOKAN_LINK_INFORMATION {
 } DOKAN_LINK_INFORMATION, *PDOKAN_LINK_INFORMATION;
 
 /**
-* \struct DOKAN_CONTROL
-* \brief Dokan Control
+* \struct DOKAN_MOUNT_POINT_INFO
+* \brief Dokan Mount point information
 */
-typedef struct _DOKAN_CONTROL {
+typedef struct _DOKAN_MOUNT_POINT_INFO {
   /** File System Type */
   ULONG Type;
   /** Mount point. Can be "M:\" (drive letter) or "C:\mount\dokan" (path in NTFS) */
@@ -495,21 +512,11 @@ typedef struct _DOKAN_CONTROL {
   WCHAR UNCName[64];
   /** Disk Device Name */
   WCHAR DeviceName[64];
-#ifdef _MSC_VER
-  /**
-  * Volume Device Object. The value is always 0
-  * and should be removed from the public DOKAN_CONTROL.
-  * MinGW also do not support PVOID64 so we convert it to ULONG64 see #902.
-  */
-  PVOID64 VolumeDeviceObject;
-#else
-  ULONG64 VolumeDeviceObject;
-#endif
   /** Session ID of calling process */
   ULONG SessionId;
   /** Contains information about the flags on the mount */
   ULONG MountOptions;
-} DOKAN_CONTROL, *PDOKAN_CONTROL;
+} DOKAN_MOUNT_POINT_INFO, *PDOKAN_MOUNT_POINT_INFO;
 
 // Dokan Major IRP values dispatched to userland for custom request with
 // EVENT_CONTEXT.
