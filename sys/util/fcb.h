@@ -1,7 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2020 - 2023 Google, Inc.
+  Copyright (C) 2020 - 2025 Google, Inc.
 
   http://dokan-dev.github.io
 
@@ -27,8 +27,8 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 extern const UNICODE_STRING g_KeepAliveFileName;
 extern const UNICODE_STRING g_NotificationFileName;
 
-// Decrements the FileCount on the given Fcb, which either deletes it or
-// schedules it for garbage collection if the FileCount becomes 0.
+// Decrements the OpenCount on the given Fcb, which either deletes it or
+// schedules it for garbage collection if the OpenCount becomes 0.
 NTSTATUS
 DokanFreeFCB(__in PDokanVCB Vcb, __in PDokanFCB Fcb);
 

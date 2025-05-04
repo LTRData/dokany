@@ -1,7 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2017 - 2023 Google, Inc.
+  Copyright (C) 2017 - 2025 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -241,6 +241,10 @@ DokanNotifyChangeDirectory(__in PREQUEST_CONTEXT RequestContext) {
 
   if (!DokanFCBFlagsIsSet(fcb, DOKAN_FILE_DIRECTORY)) {
     return STATUS_INVALID_PARAMETER;
+  }
+
+  if (DokanFCBIsPendingDeletion(fcb)) {
+    return STATUS_DELETE_PENDING;
   }
 
   DokanFCBLockRO(fcb);

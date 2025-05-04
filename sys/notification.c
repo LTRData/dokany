@@ -1,7 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2017 - 2023 Google, Inc.
+  Copyright (C) 2017 - 2025 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -168,16 +168,24 @@ VOID ReleasePendingIrp(__in PIRP_LIST PendingIrp) {
   PLIST_ENTRY listHead;
   LIST_ENTRY completeList;
   PIRP_ENTRY irpEntry;
-  PIRP irp;
+  REQUEST_CONTEXT requestContext;
 
   MoveIrpList(PendingIrp, &completeList);
   while (!IsListEmpty(&completeList)) {
     listHead = RemoveHeadList(&completeList);
     irpEntry = CONTAINING_RECORD(listHead, IRP_ENTRY, ListEntry);
-    irp = irpEntry->RequestContext.Irp;
+    requestContext = irpEntry->RequestContext;
     DokanFreeIrpEntry(irpEntry);
-    irp->IoStatus.Information = 0;
-    DokanCompleteIrpRequest(irp, STATUS_CANCELLED);
+    DOKAN_LOG_("[%s][%s] FileObject=%p",
+               DokanGetMajorFunctionStr(requestContext.IrpSp->MajorFunction),
+               DokanGetMinorFunctionStr(requestContext.IrpSp->MajorFunction,
+                                        requestContext.IrpSp->MinorFunction),
+               requestContext.IrpSp->FileObject);
+    if (requestContext.IrpSp->MajorFunction == IRP_MJ_CLEANUP) {
+      DokanExecuteCleanup(&requestContext);
+    }
+    requestContext.Irp->IoStatus.Information = 0;
+    DokanCompleteIrpRequest(requestContext.Irp, STATUS_CANCELLED);
   }
 }
 

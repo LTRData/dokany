@@ -1,7 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2020 - 2023 Google, Inc.
+  Copyright (C) 2020 - 2025 Google, Inc.
 
   http://dokan-dev.github.io
 
@@ -29,6 +29,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #include <ntddvol.h>
 #include <ntddstor.h>
 #include <ntifs.h>
+
 #include "../dokanfs_msg.h"
 
 ULONG g_Debug = DOKAN_DEBUG_DEFAULT;
@@ -333,10 +334,7 @@ PCHAR DokanGetMinorFunctionStr(UCHAR MajorFunction, UCHAR MinorFunction) {
       }
     }
     case IRP_MJ_DEVICE_CONTROL: {
-      switch (MinorFunction) {
-        default:
-          return "MN_UNKNOWN";
-      }
+      return "MN_UNKNOWN";
     }
   }
   return "";

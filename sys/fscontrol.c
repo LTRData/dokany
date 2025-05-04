@@ -1,7 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2017 - 2023 Google, Inc.
+  Copyright (C) 2017 - 2025 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -209,9 +209,7 @@ NTSTATUS DokanOplockRequest(__in PREQUEST_CONTEXT RequestContext) {
                   &fcb->FileLock);
           }
         } else {
-          // Shouldn't be something like UncleanCount counter and not FileCount
-          // here?
-          oplockCount = fcb->FileCount;
+          oplockCount = fcb->UncleanCount;
         }
       }
     } else if ((fsControlCode == FSCTL_OPLOCK_BREAK_ACKNOWLEDGE) ||
@@ -242,9 +240,9 @@ NTSTATUS DokanOplockRequest(__in PREQUEST_CONTEXT RequestContext) {
     if (((fsControlCode == FSCTL_REQUEST_FILTER_OPLOCK) ||
          (fsControlCode == FSCTL_REQUEST_BATCH_OPLOCK) ||
          ((fsControlCode == FSCTL_REQUEST_OPLOCK) &&
-          FlagOn(inputBuffer->RequestedOplockLevel, OPLOCK_LEVEL_CACHE_HANDLE))
-             ) &&
-        DokanFCBFlagsIsSet(fcb, DOKAN_DELETE_ON_CLOSE)) {
+          FlagOn(inputBuffer->RequestedOplockLevel,
+                 OPLOCK_LEVEL_CACHE_HANDLE))) &&
+        DokanFCBIsPendingDeletion(fcb)) {
       status = STATUS_DELETE_PENDING;
       __leave;
     }

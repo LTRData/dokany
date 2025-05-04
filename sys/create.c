@@ -1,7 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2020 - 2023 Google, Inc.
+  Copyright (C) 2020 - 2025 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -291,9 +291,7 @@ Otherwise, STATUS_SHARING_VIOLATION is returned.
   UNREFERENCED_PARAMETER(RequestContext);
 
   // Cannot open a file with delete pending without share delete
-  if ((FcbOrDcb->Identifier.Type == FCB) &&
-      !FlagOn(ShareAccess, FILE_SHARE_DELETE) &&
-      DokanFCBFlagsIsSet(FcbOrDcb, DOKAN_DELETE_ON_CLOSE))
+  if ((FcbOrDcb->Identifier.Type == FCB) && DokanFCBIsPendingDeletion(FcbOrDcb))
     return STATUS_DELETE_PENDING;
 
   //
@@ -699,7 +697,7 @@ Return Value:
       DOKAN_LOG_FINE_IRP(RequestContext, "Use FCB=%p", fcb);
 
       // Cannot create a file already open
-      if (fcb->FileCount > 1 && disposition == FILE_CREATE) {
+      if (fcb->UncleanCount != 0 && disposition == FILE_CREATE) {
         status = STATUS_OBJECT_NAME_COLLISION;
         __leave;
       }
@@ -751,6 +749,7 @@ Return Value:
                    RequestContext->ProcessId);
     }
     if (fcb->BlockUserModeDispatch) {
+      InterlockedIncrement(&fcb->UncleanCount);
       RequestContext->Irp->IoStatus.Information = FILE_OPENED;
       status = STATUS_SUCCESS;
       __leave;
@@ -1010,7 +1009,7 @@ Return Value:
 
     // Share access support
 
-    if (fcb->FileCount > 1) {
+    if (fcb->OpenCount > 1) {
 
       //
       //  Check if the Fcb has the proper share access.  This routine will
@@ -1159,7 +1158,7 @@ Return Value:
     //  that the Oplock check proceeds against any added access we had
     //  to give the caller.
     //
-    if (fcb->FileCount > 1) {
+    if (fcb->UncleanCount != 0) {
       status = FsRtlCheckOplock(DokanGetFcbOplock(fcb), RequestContext->Irp,
                            RequestContext->DeviceObject,
                            DokanRetryCreateAfterOplockBreak, DokanPrePostIrp);
@@ -1171,8 +1170,8 @@ Return Value:
       if (status == STATUS_PENDING) {
         DOKAN_LOG_FINE_IRP(RequestContext,
                            "FsRtlCheckOplock returned STATUS_PENDING, fcb = "
-                           "%p, fileCount = %lu",
-                           fcb, fcb->FileCount);
+                           "%p, OpenCount = %lu, UncleanCount = %lu",
+                           fcb, fcb->OpenCount, fcb->UncleanCount);
         __leave;
       }
     }
@@ -1199,10 +1198,10 @@ Return Value:
 
       //
       //  If the caller wants atomic create-with-oplock semantics, tell
-      //  the oplock package.
+      //  the oplock package. Increment `UncleanCount` by 1 as it was not yet.
       if ((status == STATUS_SUCCESS)) {
         status = FsRtlOplockFsctrl(DokanGetFcbOplock(fcb), RequestContext->Irp,
-                                   fcb->FileCount);
+                                   fcb->UncleanCount + 1);
       }
 
       //
@@ -1215,9 +1214,10 @@ Return Value:
       if ((status != STATUS_SUCCESS) &&
           (status != STATUS_OPLOCK_BREAK_IN_PROGRESS)) {
         DOKAN_LOG_FINE_IRP(RequestContext,
-                      "FsRtlOplockFsctrl failed with 0x%x %s, fcb = %p, "
-                      "fileCount = %lu",
-                      status, DokanGetNTSTATUSStr(status), fcb, fcb->FileCount);
+                           "FsRtlOplockFsctrl failed with 0x%x %s, fcb = %p, "
+                           "OpenCount = %lu, UncleanCount = %lu",
+                           status, DokanGetNTSTATUSStr(status), fcb,
+                           fcb->OpenCount, fcb->UncleanCount + 1);
 
         __leave;
       } else if (status == STATUS_OPLOCK_BREAK_IN_PROGRESS) {
@@ -1318,54 +1318,51 @@ VOID DokanCompleteCreate(__in PREQUEST_CONTEXT RequestContext,
       RequestContext->IrpSp->FileObject,
       DokanGetCreateInformationStr(RequestContext->Irp->IoStatus.Information));
 
+  ULONG options = RequestContext->IrpSp->Parameters.Create.Options;
+
   // If volume is write-protected, we subbed FILE_OPEN for FILE_OPEN_IF
   // before call to userland in DokanDispatchCreate.
   // In this case, a not found error should return write protected status.
   if ((RequestContext->Irp->IoStatus.Information == FILE_DOES_NOT_EXIST) &&
       (IS_DEVICE_READ_ONLY(RequestContext->IrpSp->DeviceObject))) {
 
-    DWORD disposition =
-        (RequestContext->IrpSp->Parameters.Create.Options >> 24) & 0x000000ff;
+    DWORD disposition = (options >> 24) & 0x000000ff;
     if (disposition == FILE_OPEN_IF) {
       DOKAN_LOG_FINE_IRP(RequestContext, "Media is write protected");
       RequestContext->Irp->IoStatus.Status = STATUS_MEDIA_WRITE_PROTECTED;
     }
   }
 
-  if (NT_SUCCESS(RequestContext->Irp->IoStatus.Status) &&
-      (RequestContext->IrpSp->Parameters.Create.Options & FILE_DIRECTORY_FILE ||
-       EventInfo->Operation.Create.Flags & DOKAN_FILE_DIRECTORY)) {
-    if (RequestContext->IrpSp->Parameters.Create.Options &
-        FILE_DIRECTORY_FILE) {
-      DOKAN_LOG_FINE_IRP(RequestContext, "FILE_DIRECTORY_FILE %p", fcb);
-    } else {
-      DOKAN_LOG_FINE_IRP(RequestContext, "DOKAN_FILE_DIRECTORY %p", fcb);
+  if (NT_SUCCESS(RequestContext->Irp->IoStatus.Status)) {
+    if (options & FILE_DIRECTORY_FILE ||
+        EventInfo->Operation.Create.Flags & DOKAN_FILE_DIRECTORY) {
+      if (options & FILE_DIRECTORY_FILE) {
+        DOKAN_LOG_FINE_IRP(RequestContext, "FILE_DIRECTORY_FILE %p", fcb);
+      } else {
+        DOKAN_LOG_FINE_IRP(RequestContext, "DOKAN_FILE_DIRECTORY %p", fcb);
+      }
+      DokanFCBFlagsSetBit(fcb, DOKAN_FILE_DIRECTORY);
     }
-    DokanFCBFlagsSetBit(fcb, DOKAN_FILE_DIRECTORY);
-  }
 
-  if (NT_SUCCESS(RequestContext->Irp->IoStatus.Status)) {
     DokanCCBFlagsSetBit(ccb, DOKAN_FILE_OPENED);
-  }
 
-  // On Windows 8 and above, you can mark the file
-  // for delete-on-close at create time, which is acted on during cleanup.
-  if (NT_SUCCESS(RequestContext->Irp->IoStatus.Status) &&
-      RequestContext->IrpSp->Parameters.Create.Options & FILE_DELETE_ON_CLOSE) {
-    DokanFCBFlagsSetBit(fcb, DOKAN_DELETE_ON_CLOSE);
-    DokanCCBFlagsSetBit(ccb, DOKAN_DELETE_ON_CLOSE);
-    DOKAN_LOG_FINE_IRP(
-        RequestContext,
-        "FILE_DELETE_ON_CLOSE is set so remember for delete in cleanup");
-  }
+    // On Windows 8 and above, you can mark the file
+    // for delete-on-close at create time, which is acted on during cleanup.
+    if (options & FILE_DELETE_ON_CLOSE) {
+      DokanCCBFlagsSetBit(ccb, DOKAN_DELETE_ON_CLOSE);
+      DOKAN_LOG_FINE_IRP(
+          RequestContext,
+          "FILE_DELETE_ON_CLOSE is set so remember for delete in cleanup");
+    }
 
-  if (NT_SUCCESS(RequestContext->Irp->IoStatus.Status)) {
+    InterlockedIncrement(&fcb->UncleanCount);
     if (RequestContext->Irp->IoStatus.Information == FILE_CREATED) {
       if (DokanFCBFlagsIsSet(fcb, DOKAN_FILE_DIRECTORY)) {
-        DokanNotifyReportChange(RequestContext, fcb, FILE_NOTIFY_CHANGE_DIR_NAME,
-                                FILE_ACTION_ADDED);
+        DokanNotifyReportChange(RequestContext, fcb,
+                                FILE_NOTIFY_CHANGE_DIR_NAME, FILE_ACTION_ADDED);
       } else {
-        DokanNotifyReportChange(RequestContext, fcb, FILE_NOTIFY_CHANGE_FILE_NAME,
+        DokanNotifyReportChange(RequestContext, fcb,
+                                FILE_NOTIFY_CHANGE_FILE_NAME,
                                 FILE_ACTION_ADDED);
       }
     }

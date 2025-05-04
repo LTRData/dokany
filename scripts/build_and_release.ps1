@@ -9,7 +9,6 @@ Add-VisualStudio-Path
 # EV_CERTTHUMBPRINT - EV Sign certificat thumb print
 # CHOCO_API_KEY - Chocolatey API key to publish new installers
 
-Write-Host Set Dokan version ...
 if (!(Test-Path -Path .\dokan_wix\SetAssemblyVersion\bin\Release\SetAssemblyVersion.exe)) {
 	Exec-External { msbuild .\dokan_wix\SetAssemblyVersion.sln /p:Configuration=Release /p:Platform="Any CPU" /t:rebuild }
 }
@@ -40,12 +39,15 @@ if (Test-Path -Path C:\cygwin64) {
 }
 
 Write-Host Build installer ...
+# Nuget restore sln fails to restore all the project of the solution for some reason so lets do it manually
+dir .\dokan_wix -include ('*.wixproj', '*.vcxproj') -recurse | ForEach-Object { .\nuget restore $_.FullName -SolutionDirectory .\dokan_wix }
 Exec-External { msbuild .\dokan_wix\Dokan_WiX.sln /p:Configuration=Release /p:Platform="Mixed Platforms" /t:rebuild /fileLogger }
-copy .\dokan_wix\Bootstrapper\bin\Release\DokanSetup.exe .\dokan_wix\
+copy .\dokan_wix\Bootstrapper\bin\x86\Release\DokanSetup.exe .\dokan_wix\
 copy .\dokan_wix\bin\x64\Release\Dokan_x64.msi .\dokan_wix\
 copy .\dokan_wix\bin\x86\Release\Dokan_x86.msi .\dokan_wix\
+copy .\dokan_wix\bin\ARM64\Release\Dokan_ARM64.msi .\dokan_wix\
 Exec-External { msbuild .\dokan_wix\Dokan_WiX.sln /p:Configuration=Debug /p:Platform="Mixed Platforms" /t:rebuild /fileLogger }
-copy .\dokan_wix\Bootstrapper\bin\Debug\DokanSetup.exe .\dokan_wix\DokanSetupDbg.exe
+copy .\dokan_wix\Bootstrapper\bin\x86\Debug\DokanSetup.exe .\dokan_wix\DokanSetupDbg.exe
 Write-Host Build installer done !
 
 Write-Host Build archive ...
@@ -57,7 +59,7 @@ if ([string]::IsNullOrEmpty($env:CHOCO_API_KEY)) {
 	Write-Host Skip Chocolatey publication due to missing CHOCO_API_KEY env variable
 	exit
 }
-$publishChocoConfirmation = Read-Host "Do you want to publish version ${version} to Chocolatey ? [y/n]"
+$publishChocoConfirmation = Read-Host "Do you want to publish to Chocolatey ? [y/n]"
 if ($publishChocoConfirmation -ne 'y') { exit }
 $baseVersion = Select-String -Path .\dokan_wix\version.xml -Pattern 'BaseVersion="(.*)"' | % { $_.Matches.groups[1].Value }
 $buildVersion = Select-String -Path .\dokan_wix\version.xml -Pattern 'BuildVersion="(.*)"' | % { $_.Matches.groups[1].Value }

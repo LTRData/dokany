@@ -1,7 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2017 - 2023 Google, Inc.
+  Copyright (C) 2017 - 2025 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -96,7 +96,7 @@ DokanDispatchQueryInformation(__in PREQUEST_CONTEXT RequestContext) {
       if (!PrepareOutputHelper(
               RequestContext->Irp, &allInfo,
               FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation.FileName),
-                          /*SetInformationOnFailure=*/FALSE)) {
+              /*SetInformationOnFailure=*/FALSE)) {
         status = STATUS_BUFFER_TOO_SMALL;
         __leave;
       }
@@ -106,7 +106,7 @@ DokanDispatchQueryInformation(__in PREQUEST_CONTEXT RequestContext) {
       PFILE_NAME_INFORMATION nameInfo;
       if (!PrepareOutputHelper(RequestContext->Irp, &nameInfo,
                                FIELD_OFFSET(FILE_NAME_INFORMATION, FileName),
-                          /*SetInformationOnFailure=*/FALSE)) {
+                               /*SetInformationOnFailure=*/FALSE)) {
         status = STATUS_BUFFER_TOO_SMALL;
         __leave;
       }
@@ -222,6 +222,7 @@ VOID DokanCompleteQueryInformation(__in PREQUEST_CONTEXT RequestContext,
   ULONG bufferLen = 0;
   PVOID buffer = NULL;
   PDokanCCB ccb;
+  PDokanFCB fcb;
 
   DOKAN_LOG_FINE_IRP(RequestContext, "FileObject=%p",
                      RequestContext->IrpSp->FileObject);
@@ -231,6 +232,9 @@ VOID DokanCompleteQueryInformation(__in PREQUEST_CONTEXT RequestContext,
   ASSERT(ccb != NULL);
 
   ccb->UserContext = EventInfo->Context;
+
+  fcb = ccb->Fcb;
+  ASSERT(fcb != NULL);
 
   // where we shold copy FileInfo to
   buffer = RequestContext->Irp->AssociatedIrp.SystemBuffer;
@@ -272,30 +276,27 @@ VOID DokanCompleteQueryInformation(__in PREQUEST_CONTEXT RequestContext,
 
       ASSERT(header != NULL);
 
+      BOOLEAN deletePending = DokanFCBIsPendingDeletion(fcb);
       if (RequestContext->IrpSp->Parameters.QueryFile.FileInformationClass ==
           FileAllInformation) {
-
         PFILE_ALL_INFORMATION allInfo = (PFILE_ALL_INFORMATION)buffer;
         allocationSize = allInfo->StandardInformation.AllocationSize.QuadPart;
         fileSize = allInfo->StandardInformation.EndOfFile.QuadPart;
 
         allInfo->PositionInformation.CurrentByteOffset =
             RequestContext->IrpSp->FileObject->CurrentByteOffset;
-
+        allInfo->StandardInformation.DeletePending = deletePending;
         DokanFCBLockRO(ccb->Fcb);
         RequestContext->Irp->IoStatus.Status = FillNameInformation(
             RequestContext, ccb->Fcb, &allInfo->NameInformation);
         DokanFCBUnlock(ccb->Fcb);
-
       } else if (RequestContext->IrpSp->Parameters.QueryFile
-                     .FileInformationClass ==
-                 FileStandardInformation) {
-
+                     .FileInformationClass == FileStandardInformation) {
         PFILE_STANDARD_INFORMATION standardInfo =
             (PFILE_STANDARD_INFORMATION)buffer;
         allocationSize = standardInfo->AllocationSize.QuadPart;
         fileSize = standardInfo->EndOfFile.QuadPart;
-
+        standardInfo->DeletePending = deletePending;
       } else if (RequestContext->IrpSp->Parameters.QueryFile
                      .FileInformationClass ==
                  FileNetworkOpenInformation) {
@@ -325,17 +326,21 @@ VOID FlushFcb(__in PREQUEST_CONTEXT RequestContext, __in PDokanFCB Fcb,
   }
 
   if (Fcb->SectionObjectPointers.ImageSectionObject != NULL) {
-    DOKAN_LOG_FINE_IRP(RequestContext, "MmFlushImageSection FCB=%p FileCount=%lu.", Fcb,
-                  Fcb->FileCount);
+    DOKAN_LOG_FINE_IRP(
+        RequestContext,
+        "MmFlushImageSection FCB=%p, OpenCount=%lu, UncleanCount=%lu.", Fcb,
+        Fcb->OpenCount, Fcb->UncleanCount);
     MmFlushImageSection(&Fcb->SectionObjectPointers, MmFlushForWrite);
-    DOKAN_LOG_FINE_IRP(RequestContext, "MmFlushImageSection done FCB=%p FileCount=%lu.", Fcb,
-                  Fcb->FileCount);
+    DOKAN_LOG_FINE_IRP(
+        RequestContext,
+        "MmFlushImageSection done FCB=%p, OpenCount=%lu, UncleanCount=%lu.",
+        Fcb, Fcb->OpenCount, Fcb->UncleanCount);
   }
 
   if (Fcb->SectionObjectPointers.DataSectionObject != NULL) {
-    DOKAN_LOG_FINE_IRP(RequestContext, "CcFlushCache FCB=%p FileCount=%lu.", Fcb,
-                  Fcb->FileCount);
-
+    DOKAN_LOG_FINE_IRP(RequestContext,
+                       "CcFlushCache FCB=%p, OpenCount=%lu, UncleanCount=%lu.",
+                       Fcb, Fcb->OpenCount, Fcb->UncleanCount);
     CcFlushCache(&Fcb->SectionObjectPointers, NULL, 0, NULL);
 
     DokanPagingIoLockRW(Fcb);
@@ -343,11 +348,14 @@ VOID FlushFcb(__in PREQUEST_CONTEXT RequestContext, __in PDokanFCB Fcb,
 
     CcPurgeCacheSection(&Fcb->SectionObjectPointers, NULL, 0, FALSE);
     if (FileObject != NULL) {
-      DOKAN_LOG_FINE_IRP(RequestContext, "CcUninitializeCacheMap FileObject=%p", FileObject);
+      DOKAN_LOG_FINE_IRP(RequestContext, "CcUninitializeCacheMap FileObject=%p",
+                         FileObject);
       CcUninitializeCacheMap(FileObject, NULL, NULL);
     }
-    DOKAN_LOG_FINE_IRP(RequestContext, "CcFlushCache done FCB=%p FileCount=%lu.", Fcb,
-                  Fcb->FileCount);
+    DOKAN_LOG_FINE_IRP(
+        RequestContext,
+        "CcFlushCache done FCB=%p, OpenCount=%lu, UncleanCount=%lu.", Fcb,
+        Fcb->OpenCount, Fcb->UncleanCount);
   }
 }
 
@@ -487,8 +495,9 @@ ULONG PopulateRenameEventInformations(__in PREQUEST_CONTEXT RequestContext,
   if (renameContext) {
     renameContext->FileNameLength = fileNameLength;
     DOKAN_LOG_FINE_IRP(
-        RequestContext, "Rename: \"%wZ\" => \"%ls\", Fcb=%p FileCount = %u",
-        Fcb->FileName, renameContext->FileName, Fcb, (ULONG)Fcb->FileCount);
+        RequestContext, "Rename: \"%wZ\" => \"%ls\", Fcb=%p, OpenCount=%lu, UncleanCount=%lu",
+        Fcb->FileName, renameContext->FileName, Fcb, Fcb->OpenCount,
+        Fcb->UncleanCount);
   }
   return fileNameLength;
 }
@@ -553,6 +562,27 @@ DokanDispatchSetInformation(__in PREQUEST_CONTEXT RequestContext) {
             ((PFILE_ALLOCATION_INFORMATION)buffer)->AllocationSize.QuadPart);
       }
     } break;
+    case FileDispositionInformation: {
+      PFILE_DISPOSITION_INFORMATION dispositionInfo =
+          (PFILE_DISPOSITION_INFORMATION)buffer;
+      if (dispositionInfo->DeleteFile == DokanFCBIsPendingDeletion(fcb)) {
+        RequestContext->IrpSp->FileObject->DeletePending =
+            dispositionInfo->DeleteFile;
+        status = STATUS_SUCCESS;
+        __leave;
+      }
+    } break;
+    case FileDispositionInformationEx: {
+      PFILE_DISPOSITION_INFORMATION_EX dispositionexInfo =
+          (PFILE_DISPOSITION_INFORMATION_EX)buffer;
+      BOOLEAN deleteRequested =
+          (dispositionexInfo->Flags & FILE_DISPOSITION_DELETE) != 0;
+      if (deleteRequested == DokanFCBIsPendingDeletion(fcb)) {
+        RequestContext->IrpSp->FileObject->DeletePending = deleteRequested;
+        status = STATUS_SUCCESS;
+        __leave;
+      }
+    } break;
     case FileEndOfFileInformation: {
       if ((fileObject->SectionObjectPointer != NULL) &&
           (fileObject->SectionObjectPointer->DataSectionObject != NULL)) {
@@ -569,7 +599,6 @@ DokanDispatchSetInformation(__in PREQUEST_CONTEXT RequestContext) {
         }
 
         if (!isPagingIo) {
-
           CcFlushCache(&fcb->SectionObjectPointers, NULL, 0, NULL);
 
           DokanPagingIoLockRW(fcb);
@@ -590,7 +619,7 @@ DokanDispatchSetInformation(__in PREQUEST_CONTEXT RequestContext) {
       ASSERT(posInfo != NULL);
 
       DOKAN_LOG_FINE_IRP(RequestContext, "FilePositionInformation %lld",
-                posInfo->CurrentByteOffset.QuadPart);
+                         posInfo->CurrentByteOffset.QuadPart);
       fileObject->CurrentByteOffset = posInfo->CurrentByteOffset;
 
       status = STATUS_SUCCESS;
@@ -605,9 +634,9 @@ DokanDispatchSetInformation(__in PREQUEST_CONTEXT RequestContext) {
        */
       targetFileObject = RequestContext->IrpSp->Parameters.SetFile.FileObject;
       if (targetFileObject != NULL) {
-          DOKAN_LOG_FINE_IRP(RequestContext,
-                             "FileObject Specified so perform flush %p \"%wZ\"",
-                             targetFileObject, &(targetFileObject->FileName));
+        DOKAN_LOG_FINE_IRP(RequestContext,
+                           "FileObject Specified so perform flush %p \"%wZ\"",
+                           targetFileObject, &(targetFileObject->FileName));
         PDokanCCB targetCcb = (PDokanCCB)targetFileObject->FsContext2;
         ASSERT(targetCcb != NULL);
         PDokanFCB targetFcb = (PDokanFCB)targetCcb->Fcb;
@@ -642,8 +671,8 @@ DokanDispatchSetInformation(__in PREQUEST_CONTEXT RequestContext) {
       if (renameInfo->RootDirectory != NULL) {
         // Relative rename
         status = ObReferenceObjectByHandle(
-            renameInfo->RootDirectory, STANDARD_RIGHTS_READ, *IoFileObjectType,
-            KernelMode, (PVOID *)&rootDirObject, NULL);
+            renameInfo->RootDirectory, /*DesiredAccess=*/0, *IoFileObjectType,
+            RequestContext->Irp->RequestorMode, (PVOID*)&rootDirObject, NULL);
         if (!NT_SUCCESS(status)) {
           DOKAN_LOG_FINE_IRP(RequestContext,
                              "Failed to get RootDirectory object - %s",
@@ -667,6 +696,8 @@ DokanDispatchSetInformation(__in PREQUEST_CONTEXT RequestContext) {
             status = STATUS_INVALID_PARAMETER;
             __leave;
           }
+        } else {
+          ObDereferenceObject(rootDirObject);
         }
       }
       // This is a dry run just to get the needed size to AllocateEventContext
@@ -842,22 +873,19 @@ VOID DokanCompleteSetInformation(__in PREQUEST_CONTEXT RequestContext,
     switch (infoClass) {
     case FileDispositionInformation:
     case FileDispositionInformationEx: {
-      if (EventInfo->Operation.Delete.DeleteOnClose) {
+      if (EventInfo->Operation.Delete.DeletePending) {
         if (!MmFlushImageSection(&fcb->SectionObjectPointers,
                                  MmFlushForDelete)) {
           DOKAN_LOG_FINE_IRP(RequestContext, "Cannot delete user mapped image");
           RequestContext->Irp->IoStatus.Status = STATUS_CANNOT_DELETE;
         } else {
-          DokanCCBFlagsSetBit(ccb, DOKAN_DELETE_ON_CLOSE);
-          DokanFCBFlagsSetBit(fcb, DOKAN_DELETE_ON_CLOSE);
+          DokanFCBFlagsSetBit(fcb, DOKAN_FCB_STATE_DELETE_PENDING);
           DOKAN_LOG_FINE_IRP(RequestContext,
                              "FileObject->DeletePending = TRUE");
           RequestContext->IrpSp->FileObject->DeletePending = TRUE;
         }
-
       } else {
-        DokanCCBFlagsClearBit(ccb, DOKAN_DELETE_ON_CLOSE);
-        DokanFCBFlagsClearBit(fcb, DOKAN_DELETE_ON_CLOSE);
+        DokanFCBFlagsClearBit(fcb, DOKAN_FCB_STATE_DELETE_PENDING);
         DOKAN_LOG_FINE_IRP(RequestContext, "FileObject->DeletePending = FALSE");
         RequestContext->IrpSp->FileObject->DeletePending = FALSE;
       }

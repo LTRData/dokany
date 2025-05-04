@@ -2,7 +2,7 @@
   Dokan : user-mode file system library for Windows
 
   Copyright (C) 2019 Adrien J. <liryna.stark@gmail.com>
-  Copyright (C) 2020 - 2023 Google, Inc.
+  Copyright (C) 2020 - 2025 Google, Inc.
 
   http://dokan-dev.github.io
 
@@ -293,9 +293,9 @@ static void DOKAN_CALLBACK memfs_cleanup(LPCWSTR filename,
   auto filenodes = GET_FS_INSTANCE;
   auto filename_str = std::wstring(filename);
   spdlog::info(L"Cleanup: {}", filename_str);
-  if (dokanfileinfo->DeleteOnClose) {
+  if (dokanfileinfo->DeletePending) {
     // Delete happens during cleanup and not in close event.
-    spdlog::info(L"\tDeleteOnClose: {}", filename_str);
+    spdlog::info(L"\tDeletePending: {}", filename_str);
     filenodes->remove(filename_str);
   }
 }
@@ -408,13 +408,12 @@ memfs_getfileInformation(LPCWSTR filename, LPBY_HANDLE_FILE_INFORMATION buffer,
   buffer->nNumberOfLinks = 1;
   buffer->dwVolumeSerialNumber = g_volumserial;
 
-  spdlog::info(
-      L"GetFileInformation: {} Attributes: {:x} Times: Creation {:x} "
-      L"LastAccess {:x} LastWrite {:x} FileSize {} NumberOfLinks {} "
-      L"VolumeSerialNumber {:x}",
-      filename_str, f->attributes, f->times.creation, f->times.lastaccess,
-      f->times.lastwrite, strLength, buffer->nNumberOfLinks,
-      buffer->dwVolumeSerialNumber);
+  spdlog::info(L"GetFileInformation: {} Attributes: {:x} Times: Creation {:x} "
+               L"LastAccess {:x} LastWrite {:x} FileSize {} NumberOfLinks {} "
+               L"VolumeSerialNumber {:x}",
+               filename_str, f->attributes.load(), f->times.creation.load(),
+               f->times.lastaccess.load(), f->times.lastwrite.load(), strLength,
+               buffer->nNumberOfLinks, buffer->dwVolumeSerialNumber);
 
   return STATUS_SUCCESS;
 }
@@ -448,7 +447,8 @@ static NTSTATUS DOKAN_CALLBACK memfs_findfiles(LPCWSTR filename,
         L"FindFiles: {} fileNode: {} Attributes: {} Times: Creation {} "
         L"LastAccess {} LastWrite {} FileSize {}",
         filename_str, fileNodeName, findData.dwFileAttributes,
-        f->times.creation, f->times.lastaccess, f->times.lastwrite, file_size);
+        f->times.creation.load(), f->times.lastaccess.load(),
+        f->times.lastwrite.load(), file_size);
     fill_finddata(&findData, dokanfileinfo);
   }
   return STATUS_SUCCESS;
@@ -515,7 +515,7 @@ memfs_deletefile(LPCWSTR filename, PDOKAN_FILE_INFO dokanfileinfo) {
   if (f->is_directory) return STATUS_ACCESS_DENIED;
 
   // Here prepare and check if the file can be deleted
-  // or if delete is canceled when dokanfileinfo->DeleteOnClose false
+  // or if delete is canceled when dokanfileinfo->DeletePending false
 
   return STATUS_SUCCESS;
 }
@@ -530,7 +530,7 @@ memfs_deletedirectory(LPCWSTR filename, PDOKAN_FILE_INFO dokanfileinfo) {
     return STATUS_DIRECTORY_NOT_EMPTY;
 
   // Here prepare and check if the directory can be deleted
-  // or if delete is canceled when dokanfileinfo->DeleteOnClose false
+  // or if delete is canceled when dokanfileinfo->DeletePending false
 
   return STATUS_SUCCESS;
 }

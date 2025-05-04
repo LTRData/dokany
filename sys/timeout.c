@@ -1,7 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2020 - 2023 Google, Inc.
+  Copyright (C) 2020 - 2025 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -83,7 +83,7 @@ ReleaseTimeoutPendingIrp(__in PDokanDCB Dcb) {
 
     RemoveEntryList(thisEntry);
 
-    DOKAN_LOG_("Timeout Irp %p", irpEntry->SerialNumber);
+    DOKAN_LOG_("Timeout Irp %ld", irpEntry->SerialNumber);
 
     irp = irpEntry->RequestContext.Irp;
 
@@ -127,6 +127,11 @@ ReleaseTimeoutPendingIrp(__in PDokanDCB Dcb) {
     irpEntry = CONTAINING_RECORD(listHead, IRP_ENTRY, ListEntry);
     irp = irpEntry->RequestContext.Irp;
     PIO_STACK_LOCATION irpSp = irpEntry->RequestContext.IrpSp;
+    DOKAN_LOG_(
+        "Cancel [%s][%s] FileObject=%p",
+        DokanGetMajorFunctionStr(irpSp->MajorFunction),
+        DokanGetMinorFunctionStr(irpSp->MajorFunction, irpSp->MinorFunction),
+        irpSp->FileObject);
     if (irpSp->MajorFunction == IRP_MJ_CREATE) {
       BOOLEAN canceled = (irpEntry->TickCount.QuadPart == 0);
       PFILE_OBJECT fileObject = irpEntry->RequestContext.IrpSp->FileObject;
@@ -134,14 +139,18 @@ ReleaseTimeoutPendingIrp(__in PDokanDCB Dcb) {
         PDokanCCB ccb = fileObject->FsContext2;
         if (ccb != NULL) {
           PDokanFCB fcb = ccb->Fcb;
-          OplockDebugRecordFlag(
-              fcb, canceled ? DOKAN_OPLOCK_DEBUG_CANCELED_CREATE
-                            : DOKAN_OPLOCK_DEBUG_TIMED_OUT_CREATE);
+          OplockDebugRecordFlag(fcb, canceled
+                                         ? DOKAN_OPLOCK_DEBUG_CANCELED_CREATE
+                                         : DOKAN_OPLOCK_DEBUG_TIMED_OUT_CREATE);
         }
       }
       DokanCancelCreateIrp(&irpEntry->RequestContext,
-          canceled ? STATUS_CANCELLED : STATUS_INSUFFICIENT_RESOURCES);
+                           canceled ? STATUS_CANCELLED
+                                    : STATUS_INSUFFICIENT_RESOURCES);
     } else {
+      if (irpSp->MajorFunction == IRP_MJ_CLEANUP) {
+        DokanExecuteCleanup(&irpEntry->RequestContext);
+      }
       irp->IoStatus.Information = 0;
       DokanCompleteIrpRequest(irp, STATUS_INSUFFICIENT_RESOURCES);
     }

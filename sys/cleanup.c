@@ -1,7 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2017 - 2023 Google, Inc.
+  Copyright (C) 2017 - 2025 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -21,6 +21,44 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "dokan.h"
+
+VOID DokanExecuteCleanup(__in PREQUEST_CONTEXT RequestContext) {
+  PFILE_OBJECT fileObject;
+  PDokanCCB ccb = NULL;
+  PDokanFCB fcb = NULL;
+
+  fileObject = RequestContext->IrpSp->FileObject;
+  DOKAN_LOG_FINE_IRP(RequestContext, "FileObject=%p", fileObject);
+
+  // Cleanup must be success in any case
+  if (!fileObject || !RequestContext->Vcb || !RequestContext->Dcb ||
+      !fileObject->FsContext2) {
+    return;
+  }
+
+  ccb = fileObject->FsContext2;
+  ASSERT(ccb != NULL);
+
+  if (!IsCcbAndDcbSameMount(RequestContext, ccb, RequestContext->Dcb)) {
+    return;
+  }
+
+  fcb = ccb->Fcb;
+  ASSERT(fcb != NULL);
+
+  DokanFCBLockRW(fcb);
+
+  InterlockedDecrement(&fcb->UncleanCount);
+
+  IoRemoveShareAccess(RequestContext->IrpSp->FileObject, &fcb->ShareAccess);
+
+  DokanFCBUnlock(fcb);
+  //
+  //  Unlock all outstanding file locks.
+  //
+  (VOID) FsRtlFastUnlockAll(&fcb->FileLock, fileObject,
+                            IoGetRequestorProcess(RequestContext->Irp), NULL);
+}
 
 NTSTATUS
 DokanDispatchCleanup(__in PREQUEST_CONTEXT RequestContext)
@@ -55,16 +93,59 @@ Return Value:
   DOKAN_LOG_FINE_IRP(RequestContext, "FileObject=%p", fileObject);
 
   // Cleanup must be success in any case
-  if (fileObject == NULL || RequestContext->Vcb == NULL ||
-      !DokanCheckCCB(RequestContext, fileObject->FsContext2)) {
+  if (!fileObject || !RequestContext->Vcb || !RequestContext->Dcb ||
+      !fileObject->FsContext2) {
     return STATUS_SUCCESS;
   }
 
   ccb = fileObject->FsContext2;
   ASSERT(ccb != NULL);
 
+  if (!IsCcbAndDcbSameMount(RequestContext, ccb, RequestContext->Dcb)) {
+    return STATUS_SUCCESS;
+  }
+
   fcb = ccb->Fcb;
   ASSERT(fcb != NULL);
+
+  DokanFCBLockRO(fcb);
+  if (DokanFCBFlagsIsSet(fcb, DOKAN_FILE_CHANGE_LAST_WRITE)) {
+    DokanNotifyReportChange(RequestContext, fcb, FILE_NOTIFY_CHANGE_LAST_WRITE,
+                            FILE_ACTION_MODIFIED);
+  }
+  // DeleteOnClose is set during CreateFile but is only executed by the last
+  // handle on the object is closed. We transfer the marker to the Fcb and will
+  // see below if there is any outstanding open handle that will delay the
+  // deletion execution.
+  if (DokanCCBFlagsIsSet(ccb, DOKAN_DELETE_ON_CLOSE)) {
+    // `DOKAN_FCB_STATE_DELETE_PENDING` will prevent the Fcb to be open. Note:
+    // Since `UncleanCount` is set on `DokanCompleteCreate` but this flag is
+    // checked during `DokanDispatchCreate`, there is still a possible race
+    // condition where an inflight create will succeed.
+    DokanFCBFlagsSetBit(fcb, DOKAN_FCB_STATE_DELETE_PENDING);
+    DokanCCBFlagsClearBit(ccb, DOKAN_DELETE_ON_CLOSE);
+    DOKAN_LOG_FINE_IRP(RequestContext,
+                       "Transfer DeleteOnClose from Ccb=%p to Fcb=%p", ccb,
+                       fcb);
+  }
+  // The Fcb is marked for deletion due to DeleteOnClose or through
+  // FileDisposition, the last handle will execute the deletion.
+  BOOLEAN deletePending =
+      fcb->UncleanCount == 1 && DokanFCBIsPendingDeletion(fcb);
+  BOOLEAN isDirectory = DokanFCBFlagsIsSet(fcb, DOKAN_FILE_DIRECTORY);
+  if (deletePending) {
+    DokanNotifyReportChange(RequestContext, fcb,
+                            isDirectory ? FILE_NOTIFY_CHANGE_DIR_NAME
+                                        : FILE_NOTIFY_CHANGE_FILE_NAME,
+                            FILE_ACTION_REMOVED);
+  }
+  if (isDirectory) {
+    FsRtlNotifyCleanup(RequestContext->Vcb->NotifySync,
+                       &RequestContext->Vcb->DirNotifyList, ccb);
+  }
+  DokanFCBUnlock(fcb);
+
+  BOOLEAN isUnmountPending = IsUnmountPendingVcb(RequestContext->Vcb);
 
   OplockDebugRecordMajorFunction(fcb, IRP_MJ_CLEANUP);
   if (fcb->IsKeepalive) {
@@ -78,7 +159,7 @@ Return Value:
     }
     DokanFCBUnlock(fcb);
     if (shouldUnmount) {
-      if (IsUnmountPendingVcb(RequestContext->Vcb)) {
+      if (isUnmountPending) {
         DokanLogInfo(&logger,
                      L"Ignoring keepalive close because unmount is already in"
                      L" progress.");
@@ -88,14 +169,16 @@ Return Value:
       }
     }
   }
-  if (fcb->BlockUserModeDispatch) {
+  if (isUnmountPending || fcb->BlockUserModeDispatch) {
+    // Request will not reach Userland and therefore `DokanCompleteCleanup`
+    // will not run, releasing the resources now.
+    DokanExecuteCleanup(RequestContext);
     return STATUS_SUCCESS;
   }
 
   FlushFcb(RequestContext, fcb, fileObject);
 
   DokanFCBLockRW(fcb);
-
 
   eventLength = sizeof(EVENT_CONTEXT) + fcb->FileName.Length;
   eventContext = AllocateEventContext(RequestContext, eventLength, ccb);
@@ -108,7 +191,8 @@ Return Value:
   fileObject->Flags |= FO_CLEANUP_COMPLETE;
 
   eventContext->Context = ccb->UserContext;
-  eventContext->FileFlags |= DokanCCBFlagsGet(ccb);
+  eventContext->FileFlags |=
+      DokanCCBFlagsGet(ccb) | (deletePending ? DOKAN_DELETE_ON_CLOSE : 0);
 
   // copy the filename to EventContext from ccb
   eventContext->Operation.Cleanup.FileNameLength = fcb->FileName.Length;
@@ -117,8 +201,7 @@ Return Value:
 
   // FsRtlCheckOpLock is called with non-NULL completion routine - not blocking.
   status = DokanCheckOplock(fcb, RequestContext->Irp, eventContext,
-                            DokanOplockComplete,
-                            DokanPrePostIrp);
+                            DokanOplockComplete, DokanPrePostIrp);
   DokanFCBUnlock(fcb);
 
   //
@@ -127,7 +210,8 @@ Return Value:
   //
   if (status != STATUS_SUCCESS) {
     if (status == STATUS_PENDING) {
-      DOKAN_LOG_FINE_IRP(RequestContext, "FsRtlCheckOplock returned STATUS_PENDING");
+      DOKAN_LOG_FINE_IRP(RequestContext,
+                         "FsRtlCheckOplock returned STATUS_PENDING");
     } else {
       DokanFreeEventContext(eventContext);
     }
@@ -140,53 +224,10 @@ Return Value:
 
 VOID DokanCompleteCleanup(__in PREQUEST_CONTEXT RequestContext,
                           __in PEVENT_INFORMATION EventInfo) {
-  PDokanCCB ccb;
-  PDokanFCB fcb;
-  PFILE_OBJECT fileObject;
-
   DOKAN_LOG_FINE_IRP(RequestContext, "FileObject=%p",
                      RequestContext->IrpSp->FileObject);
 
-  fileObject = RequestContext->IrpSp->FileObject;
-  ASSERT(fileObject != NULL);
-
-  ccb = fileObject->FsContext2;
-  ASSERT(ccb != NULL);
-  ccb->UserContext = EventInfo->Context;
-
-  fcb = ccb->Fcb;
-  ASSERT(fcb != NULL);
-
-  DokanFCBLockRW(fcb);
-
-  IoRemoveShareAccess(RequestContext->IrpSp->FileObject, &fcb->ShareAccess);
-
-  if (DokanFCBFlagsIsSet(fcb, DOKAN_FILE_CHANGE_LAST_WRITE)) {
-    DokanNotifyReportChange(RequestContext, fcb,
-                            FILE_NOTIFY_CHANGE_LAST_WRITE,
-                            FILE_ACTION_MODIFIED);
-  }
-
-  if (DokanFCBFlagsIsSet(fcb, DOKAN_DELETE_ON_CLOSE)) {
-    if (DokanFCBFlagsIsSet(fcb, DOKAN_FILE_DIRECTORY)) {
-      DokanNotifyReportChange(RequestContext, fcb, FILE_NOTIFY_CHANGE_DIR_NAME,
-                              FILE_ACTION_REMOVED);
-    } else {
-      DokanNotifyReportChange(RequestContext, fcb, FILE_NOTIFY_CHANGE_FILE_NAME,
-                              FILE_ACTION_REMOVED);
-    }
-  }
-  DokanFCBUnlock(fcb);
-  //
-  //  Unlock all outstanding file locks.
-  //
-  (VOID) FsRtlFastUnlockAll(&fcb->FileLock, fileObject,
-                            IoGetRequestorProcess(RequestContext->Irp), NULL);
-
-  if (DokanFCBFlagsIsSet(fcb, DOKAN_FILE_DIRECTORY)) {
-    FsRtlNotifyCleanup(RequestContext->Vcb->NotifySync,
-                       &RequestContext->Vcb->DirNotifyList, ccb);
-  }
+  DokanExecuteCleanup(RequestContext);
 
   RequestContext->Irp->IoStatus.Status = EventInfo->Status;
 }

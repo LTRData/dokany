@@ -1,7 +1,7 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2020 - 2023 Google, Inc.
+  Copyright (C) 2020 - 2025 Google, Inc.
   Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
@@ -33,9 +33,9 @@ THE SOFTWARE.
 #include <stdlib.h>
 #include <winbase.h>
 
-// Enable Long Paths on Windows 10 version 1607 and later by changing
-// the OS configuration (see Microsoft own documentation for the steps)
-// and rebuild the mirror with the following line uncommented.
+// Long Paths is supported from Windows 10 version 1607 but require changing the OS configuration.
+// See https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation?tabs=registry#registry-setting-to-enable-long-paths
+// The root directory mirrored require the "\\?\" prefix like "\\?\D:\very long path" or "\\?\UNC\myfs\\fs1" for UNC.
 #define WIN10_ENABLE_LONG_PATH
 #ifdef WIN10_ENABLE_LONG_PATH
 //dirty but should be enough
@@ -433,6 +433,10 @@ MirrorCreateFile(LPCWSTR FileName, PDOKAN_IO_SECURITY_CONTEXT SecurityContext,
         (fileAttributesAndFlags & FILE_FLAG_DELETE_ON_CLOSE))
       return STATUS_CANNOT_DELETE;
 
+    // Remove FILE_FLAG_DELETE_ON_CLOSE to avoid CloseHandle triggering a deletion.
+    // The Drive will inform us through `DeletePending` when to delete it.
+    fileAttributesAndFlags &= ~FILE_FLAG_DELETE_ON_CLOSE;
+
     // Truncate should always be used with write access
     if (creationDisposition == TRUNCATE_EXISTING)
       genericDesiredAccess |= GENERIC_WRITE;
@@ -521,10 +525,8 @@ static void DOKAN_CALLBACK MirrorCleanup(LPCWSTR FileName,
     DbgPrint(L"Cleanup: %s\n\tinvalid handle\n\n", filePath);
   }
 
-  if (DokanFileInfo->DeleteOnClose) {
-    // Should already be deleted by CloseHandle
-    // if open with FILE_FLAG_DELETE_ON_CLOSE
-    DbgPrint(L"\tDeleteOnClose\n");
+  if (DokanFileInfo->DeletePending) {
+    DbgPrint(L"\tDeletePending\n");
     if (DokanFileInfo->IsDirectory) {
       DbgPrint(L"  DeleteDirectory ");
       if (!RemoveDirectory(filePath)) {
@@ -837,7 +839,7 @@ MirrorDeleteFile(LPCWSTR FileName, PDOKAN_FILE_INFO DokanFileInfo) {
   HANDLE handle = (HANDLE)DokanFileInfo->Context;
 
   GetFilePath(filePath, DOKAN_MAX_PATH, FileName);
-  DbgPrint(L"DeleteFile %s - %d\n", filePath, DokanFileInfo->DeleteOnClose);
+  DbgPrint(L"DeleteFile %s - %d\n", filePath, DokanFileInfo->DeletePending);
 
   DWORD dwAttrib = GetFileAttributes(filePath);
 
@@ -847,7 +849,7 @@ MirrorDeleteFile(LPCWSTR FileName, PDOKAN_FILE_INFO DokanFileInfo) {
 
   if (handle && handle != INVALID_HANDLE_VALUE) {
     FILE_DISPOSITION_INFO fdi;
-    fdi.DeleteFile = DokanFileInfo->DeleteOnClose;
+    fdi.DeleteFile = DokanFileInfo->DeletePending;
     if (!SetFileInformationByHandle(handle, FileDispositionInfo, &fdi,
                                     sizeof(FILE_DISPOSITION_INFO)))
       return DokanNtStatusFromWin32(GetLastError());
@@ -868,9 +870,9 @@ MirrorDeleteDirectory(LPCWSTR FileName, PDOKAN_FILE_INFO DokanFileInfo) {
   GetFilePath(filePath, DOKAN_MAX_PATH, FileName);
 
   DbgPrint(L"DeleteDirectory %s - %d\n", filePath,
-           DokanFileInfo->DeleteOnClose);
+           DokanFileInfo->DeletePending);
 
-  if (!DokanFileInfo->DeleteOnClose)
+  if (!DokanFileInfo->DeletePending)
     //Dokan notify that the file is requested not to be deleted.
     return STATUS_SUCCESS;
 
@@ -1522,7 +1524,6 @@ void ShowUsage() {
           "  /k Sector size (ex. /k 512)\t\t\t Sector Size of the volume. This will behave on the disk file size.\n"
           "  /f User mode Lock\t\t\t\t Enable Lockfile/Unlockfile operations. Otherwise Dokan will take care of it.\n"
           "  /i Timeout in Milliseconds (ex. /i 30000)\t Timeout until a running operation is aborted and the device is unmounted.\n"
-          "  /z Enabled FCB GCt\t\t\t\t Might speed up on env with filter drivers (Anti-virus) slowing down the system.\n"
           "  /x Network unmount\t\t\t\t Allows unmounting network drive from file explorer.\n"
           "  /e Enable Driver Logs\t\t\t\t Forward Driver logs to userland.\n"
           "  /v Volume name\t\t\t\t Personalize the volume name.\n\n"
