@@ -13,6 +13,10 @@
       WLK_INST_CACHE: '%DOKAN_CI_CACHE%\wlk_inst'
       DOKAN_MAIN_BUILD_JOB_NAME: "Image: Visual Studio 2019; Configuration: All"
 
+  init:
+    - git config --global core.autocrlf false
+    - git config --global core.safecrlf false
+
   skip_tags: true
   version: 2.3.0-{build}
   configuration:
