@@ -1,5 +1,25 @@
 # Dokany
 
+## About this LTRData fork
+
+This is [LTRData's fork](https://github.com/LTRData/dokany) of [dokan-dev/dokany](https://github.com/dokan-dev/dokany). Its history includes filesystem-close callback registration, multi-user session fixes and drive-enumeration filtering changes, together with periodic upstream merges.
+
+Those earlier changes are now also present upstream. At the [April 2026 LTRData revision](https://github.com/LTRData/dokany/commit/bafa131238e89270c8a869503fd34ee4a656838c), the library, driver, FUSE wrapper and sample sources match [upstream revision c7a59fc](https://github.com/dokan-dev/dokany/commit/c7a59fc68ddcfeb4474f2fe7f24be4eb264af6a2). The remaining differences are Git line-ending configuration, AppVeyor checkout settings and an upstream test-script update. The checked-in version is **2.3.1**, using Dokan API major version **2**.
+
+For standard downloads and signed driver releases, use the [upstream releases](https://github.com/dokan-dev/dokany/releases). The badges, platform statements, downloads and contribution links in the preserved documentation below refer to the upstream project.
+
+### Building this fork
+
+Clone the fork with its sample dependency:
+
+```sh
+git clone --recurse-submodules https://github.com/LTRData/dokany.git
+```
+
+The `dokan_memfs` sample uses the `spdlog` submodule. The library project selects Visual C++ toolset `v142` and Windows SDK `10.0.19041.0`; the driver uses the Windows 10 kernel-mode driver toolset. Use the upstream build guide below with the requirements in the checked-in project files.
+
+## Upstream documentation
+
 [![Github All Releases](https://img.shields.io/github/downloads/dokan-dev/dokany/total.svg)](https://github.com/dokan-dev/dokany/releases)
 [![Build status](https://ci.appveyor.com/api/projects/status/4tpt4v8btyahh3le/branch/master?svg=true)](https://ci.appveyor.com/project/Maxhy/dokany/branch/master)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=dokany&metric=alert_status)](https://sonarcloud.io/dashboard?id=dokany)
