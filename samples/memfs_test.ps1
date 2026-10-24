@@ -1,5 +1,7 @@
+# Omit -FsxSeed for a fresh random seed per FSX run; supply the printed seed to repeat it.
 param(
-    [Parameter(Mandatory=$false)][Array] $Memfs = @("..\x64\Release\memfs.exe", "..\Win32\Release\memfs.exe")
+    [Parameter(Mandatory=$false)][Array] $Memfs = @("..\x64\Release\memfs.exe", "..\Win32\Release\memfs.exe"),
+    [ValidateRange(1, 2147483647)][Nullable[int]] $FsxSeed = $null
 )
 #TODO: enable specifying own mirror-commands and own test-commands
 #TODO: move compilation of test tools to separate scripts in scripts
@@ -149,7 +151,9 @@ foreach ($mfs in $Memfs) {
 		}
 
 		Write-Host "Start FSX Test" -ForegroundColor Green
-		Exec-External {& .\fstools\src\fsx\fsx.exe -N 5000 "$($destination)\fsxtest"}
+		$seed = if ($null -eq $FsxSeed) { Get-Random -Minimum 1 -Maximum 2147483647 } else { $FsxSeed }
+		Write-Host "FSX seed: $seed (repeat with -FsxSeed $seed and the same mount configuration)"
+		Exec-External {& .\fstools\src\fsx\fsx.exe -N 5000 -S $seed "$($destination)\fsxtest"}
 		Write-Host "FSX Test finished" -ForegroundColor Green
 
 		Write-Host "Start WinFSTest" -ForegroundColor Green

@@ -3,6 +3,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](http://keepachangelog.com/) and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- Tests - Record each FSX seed before execution and allow replay with -FsxSeed (#419).
+
 ## [2.3.1.1000] - 2025-09-28
 
 ### Changed
