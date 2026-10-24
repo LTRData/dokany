@@ -1,7 +1,35 @@
+<#
+.SYNOPSIS
+Runs Mirror filesystem tests. With no suite switches, all three suites run.
+.EXAMPLE
+.\mirror_test.ps1 -Fsx -WinFsTest -Configs drive,netUnc -Path C:\MirrorTests
+.PARAMETER Configs
+Mount configurations to test; all existing configurations are selected by default.
+.PARAMETER Path
+Parent directory for the FSTMP and FSTMP2 backing/test directories (default C:\).
+.PARAMETER IfsTestUser
+Existing Windows account used by IFSTest; defaults to dokan_ifstest.
+.PARAMETER IfsTestPass
+Password of the IFSTest account; defaults to the existing CI test password.
+#>
 param(
-    [Parameter(Mandatory=$false)][Array] $Mirrors = @("..\x64\Release\mirror.exe", "..\Win32\Release\mirror.exe")
+    [Parameter(Mandatory=$false)][Array] $Mirrors = @("..\x64\Release\mirror.exe", "..\Win32\Release\mirror.exe"),
+    [switch] $Fsx,
+    [switch] $WinFsTest,
+    [switch] $IfsTest,
+    [ValidateNotNullOrEmpty()]
+    [ValidateSet('drive', 'dirJunction', 'driveRemovable', 'driveRemovableMntMgr', 'driveMntMgr', 'netUnc')]
+    [string[]] $Configs = @('drive', 'dirJunction', 'driveRemovable', 'driveRemovableMntMgr', 'driveMntMgr', 'netUnc'),
+    [ValidateNotNullOrEmpty()][string] $IfsTestUser = "dokan_ifstest",
+    [ValidateNotNullOrEmpty()][string] $IfsTestPass = "D0kan_1fstest",
+    [ValidateNotNullOrEmpty()][string] $Path = "C:\"
 )
-#TODO: enable specifying own mirror-commands and own test-commands
+
+$runAll = !($Fsx -or $WinFsTest -or $IfsTest)
+$runFsx = $runAll -or $Fsx
+$runWinFsTest = $runAll -or $WinFsTest
+$runIfsTest = $runAll -or $IfsTest
+
 #TODO: move compilation of test tools to separate scripts in scripts
 #TODO: allow running from any directory by using the path this script is located in as reference
 
@@ -15,15 +43,11 @@ function Exec-External {
   }
 }
 
-$ifstest_user = "dokan_ifstest"
-$ifstest_pass = "D0kan_1fstest"
-# TODO: read password from command-line or file to keep dev-machines secure
-
-$fsTestPath = "C:\FSTMP"
-$fsTestPath2 = "C:\FSTMP2"
+$fsTestPath = Join-Path $Path "FSTMP"
+$fsTestPath2 = Join-Path $Path "FSTMP2"
 
 $DokanDriverLetter = "M"
-$Configs = @(
+$MirrorConfigurations = @(
 	@{
 		"MirrorArguments" = "/l $DokanDriverLetter";
 		"Destination" = "$($DokanDriverLetter):";
@@ -55,6 +79,7 @@ $Configs = @(
 		"Name" = "netUnc";
 	}
 )
+$MirrorConfigurations = @($MirrorConfigurations | Where-Object { $Configs -contains $_.Name })
 
 $ifstestParameters = @(
 	"-t", "FileNameLengthTest",            # reason: buffer overflow in mirror. Issue #511
@@ -91,8 +116,8 @@ $ifstestParameters = @(
 	"/v",                                  # verbose output
 	"/d", "\Device\Dokan_2"                # Dokan device named need for FileSystemDeviceOpenTest
 	"/r", "$fsTestPath2"                   # SimpleRenameInformationTest need an extra volum
-	"/u", $ifstest_user,
-	"/U", $ifstest_pass
+	"/u", $IfsTestUser,
+	"/U", $IfsTestPass
 )
 
 $fstoolsRevision="f010a68f96e004e8ef76436c0582e64216f400a0"
@@ -100,9 +125,9 @@ $winfstestRevision="98faa827b31d6e9144ff7c2c235f0b07b0ccf5d0"
 $buildCmd = "C:\Program Files (x86)\MSBuild\14.0\Bin\MSBuild.exe"
 $vswhere = "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 if (Test-Path $vswhere) {
-	$path = & "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
-	if ($path) {
-		$tmpBuildCmd = join-path $path 'MSBuild\Current\Bin\MSBuild.exe'
+	$vsPath = & "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+	if ($vsPath) {
+		$tmpBuildCmd = join-path $vsPath 'MSBuild\Current\Bin\MSBuild.exe'
 		if (test-path $tmpBuildCmd) {
 			# Visual studio 2019
 			$buildCmd = $tmpBuildCmd
@@ -117,7 +142,7 @@ $env:CI_BUILD_ARG = ""
 if ($env:APPVEYOR) { $env:CI_BUILD_ARG="/l:C:\Program Files\AppVeyor\BuildAgent\Appveyor.MSBuildLogger.dll" }
  
 Write-Host Build test tools -ForegroundColor Green
-if (!(Test-Path .\fstools\src\fsx\fsx.exe))
+if ($runFsx -and !(Test-Path .\fstools\src\fsx\fsx.exe))
 {
 	Exec-External {if (!(Test-Path fstools)) { git clone -q https://github.com/Liryna/fstools.git } }
 	Exec-External {cd fstools; git reset --hard $fstoolsRevision; cd .. }
@@ -130,7 +155,7 @@ if (!(Test-Path .\fstools\src\fsx\fsx.exe))
 	Exec-External {& $buildCmd $buildArgs}
 }
 
-if (!(Test-Path .\winfstest\TestSuite\winfstest.exe))
+if ($runWinFsTest -and !(Test-Path .\winfstest\TestSuite\winfstest.exe))
 {
 	Exec-External {if (!(Test-Path winfstest)) { git clone -q https://github.com/Liryna/winfstest.git } }
 	Exec-External {cd winfstest; git reset --hard $winfstestRevision; cd .. }
@@ -145,13 +170,13 @@ if (!(Test-Path .\winfstest\TestSuite\winfstest.exe))
 Write-Host Build test tools done. -ForegroundColor Green
 
 if (!(Test-Path $fsTestPath)) { New-Item $fsTestPath -type directory | Out-Null }
-if (!(Test-Path $fsTestPath2)) { New-Item $fsTestPath2 -type directory | Out-Null }
+if ($runIfsTest -and !(Test-Path $fsTestPath2)) { New-Item $fsTestPath2 -type directory | Out-Null }
 
 add-type -AssemblyName System.Windows.Forms
 
 $mirrorCount = 1;
 foreach ($mirror in $Mirrors) {
-	foreach ($Config in $Configs) {
+	foreach ($Config in $MirrorConfigurations) {
 		$command = $Config.Item("MirrorArguments")
 		$destination = $Config.Item("Destination")
 		$Name  = "$mirrorCount\$($Config.Item("Name"))"
@@ -160,7 +185,7 @@ foreach ($mirror in $Mirrors) {
 
 		# Cleanup mirror folder and second volume folder
 		Remove-Item -Recurse -Force "$MirrorDir\*" | Out-Null
-		Remove-Item -Recurse -Force "$fsTestPath2\*" | Out-Null
+		if ($runIfsTest) { Remove-Item -Recurse -Force "$fsTestPath2\*" | Out-Null }
 		# dummy file used for checking that the mount succeeded further below
 		New-Item -Force "$MirrorDir\tmp" | Out-Null
 
@@ -171,7 +196,7 @@ foreach ($mirror in $Mirrors) {
 			Remove-Item -Recurse -Force "$($destination)\*" | Out-Null
 		}
 		
-		$app = Start-Process -passthru $mirror -ArgumentList "/r $MirrorDir $command"
+		$app = Start-Process -passthru $mirror -ArgumentList "/r `"$MirrorDir`" $command"
 		
 		# When mirror finished mounting, Test-Path will return success.
 		$count = 20;
@@ -181,20 +206,26 @@ foreach ($mirror in $Mirrors) {
 			throw ("Impossible to mount for command $command")
 		}
 
-		Write-Host "Start FSX Test" -ForegroundColor Green
-		Exec-External {& .\fstools\src\fsx\fsx.exe -N 5000 "$($destination)\fsxtest"}
-		Write-Host "FSX Test finished" -ForegroundColor Green
+		if ($runFsx) {
+			Write-Host "Start FSX Test" -ForegroundColor Green
+			Exec-External {& .\fstools\src\fsx\fsx.exe -N 5000 "$($destination)\fsxtest"}
+			Write-Host "FSX Test finished" -ForegroundColor Green
+		}
 
-		Write-Host "Start WinFSTest" -ForegroundColor Green
-		Exec-External {& .\winfstest\TestSuite\run-winfstest.bat . "$($destination)\"}
-		Write-Host "WinFSTest finished" -ForegroundColor Green
+		if ($runWinFsTest) {
+			Write-Host "Start WinFSTest" -ForegroundColor Green
+			Exec-External {& .\winfstest\TestSuite\run-winfstest.bat . "$($destination)\"}
+			Write-Host "WinFSTest finished" -ForegroundColor Green
+		}
 
-		if ($destination -match "[a-zA-Z]:") {
-			Write-Host "Start IFSTest" -ForegroundColor Green
-			Exec-External {& "..\scripts\run_ifstest.ps1" @ifstestParameters "$($destination)\"}
-			Write-Host "IFSTest finished" -ForegroundColor Green
-		} else {
-			Write-Host "Skipping IFSTest, because it cannot be run against UNC-Paths" -ForegroundColor Green
+		if ($runIfsTest) {
+			if ($destination -match "[a-zA-Z]:") {
+				Write-Host "Start IFSTest" -ForegroundColor Green
+				Exec-External {& "..\scripts\run_ifstest.ps1" @ifstestParameters "$($destination)\"}
+				Write-Host "IFSTest finished" -ForegroundColor Green
+			} else {
+				Write-Host "Skipping IFSTest, because it cannot be run against UNC-Paths" -ForegroundColor Green
+			}
 		}
 
 		#TODO: can we use dokanctl to unmount?

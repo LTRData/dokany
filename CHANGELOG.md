@@ -3,6 +3,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](http://keepachangelog.com/) and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Tests - Allow selecting Mirror suites and mount configurations, IFSTest credentials, and a test-data parent path (#596).
+
 ## [2.3.1.1000] - 2025-09-28
 
 ### Changed
