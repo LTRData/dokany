@@ -273,6 +273,9 @@ typedef struct _DOKAN_OPERATIONS {
   * DOKAN_FILE_INFO.Context can be used to store Data (like \c HANDLE)
   * that can be retrieved in all other requests related to the Context.
   * To avoid memory leak, Context needs to be released in DOKAN_OPERATIONS.Cleanup.
+  * Any parent FILE_DELETE_CHILD access checks must be performed by the filesystem
+  * implementation while opening the requested file. A parent directory context
+  * must not be returned in place of the requested file's context.
   *
   * \param FileName File path requested by the Kernel on the FileSystem.
   * \param SecurityContext SecurityContext, see https://msdn.microsoft.com/en-us/library/windows/hardware/ff550613(v=vs.85).aspx
