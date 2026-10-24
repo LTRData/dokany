@@ -3,6 +3,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](http://keepachangelog.com/) and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- FUSE - Build Cygwin/MinGW distributions with optimized debug information by default; allow selecting the CMake build type (#427).
+
 ## [2.3.1.1000] - 2025-09-28
 
 ### Changed

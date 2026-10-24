@@ -1,3 +1,8 @@
+param(
+    [ValidateSet('Debug', 'Release', 'RelWithDebInfo', 'MinSizeRel')]
+    [string] $BuildType = 'RelWithDebInfo'
+)
+
 $currentPath=Get-Location
 if (-not (Test-Path env:MSYS2_INST_DIR)) { $env:MSYS2_INST_DIR = 'C:\msys64' }
 if (-not (Test-Path env:CYGWIN_INST_DIR)) { $env:CYGWIN_INST_DIR = 'C:\cygwin64' }
@@ -8,7 +13,7 @@ $script:failed = 0
     New-Item -Force -Type Directory $buildDir
     & $env:CYGWIN_INST_DIR\bin\bash -lc "
         cd '$currentPath'/'$buildDir' &&
-        cmake ../../../ -DCMAKE_INSTALL_PREFIX='../../../../$installDir' -DCMAKE_INSTALL_BINDIR=. &&
+        cmake ../../../ -DCMAKE_BUILD_TYPE=$BuildType -DCMAKE_INSTALL_PREFIX='../../../../$installDir' -DCMAKE_INSTALL_BINDIR=. &&
         make -j `$(getconf _NPROCESSORS_ONLN) install"
     & $env:CYGWIN_INST_DIR\bin\bash -lc "
         cd '$currentPath' &&
@@ -23,7 +28,7 @@ $script:failed = 0
     New-Item -Force -Type Directory $buildDir
     & $env:CYGWIN_INST_DIR\bin\bash -lc "
         cd '$currentPath'/'$buildDir' &&
-        cmake ../../../ -DCMAKE_INSTALL_PREFIX='../../../../$installDir' -DCMAKE_INSTALL_BINDIR=. &&
+        cmake ../../../ -DCMAKE_BUILD_TYPE=$BuildType -DCMAKE_INSTALL_PREFIX='../../../../$installDir' -DCMAKE_INSTALL_BINDIR=. &&
         make -j `$(getconf _NPROCESSORS_ONLN) install"
     & $env:CYGWIN_INST_DIR\bin\bash -lc "
         cd '$currentPath' &&
@@ -39,7 +44,7 @@ $script:failed = 0
     $env:MSYSTEM = "MINGW32"
     & $env:MSYS2_INST_DIR\usr\bin\bash -lc "
         cd '$currentPath'/'$buildDir' &&
-        cmake ../../../ -DCMAKE_INSTALL_PREFIX='../../../../$installDir' -DCMAKE_INSTALL_BINDIR=. -G 'MSYS Makefiles' &&
+        cmake ../../../ -DCMAKE_BUILD_TYPE=$BuildType -DCMAKE_INSTALL_PREFIX='../../../../$installDir' -DCMAKE_INSTALL_BINDIR=. -G 'MSYS Makefiles' &&
         make -j `$(getconf _NPROCESSORS_ONLN) install"
     }
     Remove-Item Env:\MSYSTEM
@@ -53,7 +58,7 @@ $script:failed = 0
     $env:MSYSTEM = "MINGW64"
     & $env:MSYS2_INST_DIR\usr\bin\bash -lc "
         cd '$currentPath'/'$buildDir' &&
-        cmake ../../../ -DCMAKE_INSTALL_PREFIX='../../../../$installDir' -DCMAKE_INSTALL_BINDIR=. -G 'MSYS Makefiles' &&
+        cmake ../../../ -DCMAKE_BUILD_TYPE=$BuildType -DCMAKE_INSTALL_PREFIX='../../../../$installDir' -DCMAKE_INSTALL_BINDIR=. -G 'MSYS Makefiles' &&
         make -j `$(getconf _NPROCESSORS_ONLN) install"
     Remove-Item Env:\MSYSTEM
     if ($LASTEXITCODE -ne 0) {
